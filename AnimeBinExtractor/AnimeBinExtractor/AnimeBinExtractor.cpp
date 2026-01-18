@@ -8,8 +8,16 @@
 #include <cstdint>
 #include <algorithm>
 #include <filesystem>
+#include <cfloat>   // FLT_MAX
 
 using namespace std;
+
+// =========================================================
+// 옵션
+// 1: Skeleton(eSkeleton) 노드만 트랙 생성 (권장: 불필요 노드 트랙 방지)
+// 0: 키가 있는 모든 노드 트랙 생성 (루트모션/더미노드 포함 가능)
+// =========================================================
+#define EXPORT_SKELETON_ONLY 1
 
 // ======================================================================
 // BIN 쓰기 헬퍼
@@ -20,32 +28,16 @@ static void WriteRaw(ofstream& out, const void* data, size_t size)
     out.write(reinterpret_cast<const char*>(data), size);
 }
 
-static void WriteUInt16(ofstream& out, uint16_t v)
-{
-    WriteRaw(out, &v, sizeof(v));
-}
-
-static void WriteUInt32(ofstream& out, uint32_t v)
-{
-    WriteRaw(out, &v, sizeof(v));
-}
-
-static void WriteInt32(ofstream& out, int32_t v)
-{
-    WriteRaw(out, &v, sizeof(v));
-}
-
-static void WriteFloat(ofstream& out, float f)
-{
-    WriteRaw(out, &f, sizeof(f));
-}
+static void WriteUInt16(ofstream& out, uint16_t v) { WriteRaw(out, &v, sizeof(v)); }
+static void WriteUInt32(ofstream& out, uint32_t v) { WriteRaw(out, &v, sizeof(v)); }
+static void WriteInt32(ofstream& out, int32_t  v) { WriteRaw(out, &v, sizeof(v)); }
+static void WriteFloat(ofstream& out, float    f) { WriteRaw(out, &f, sizeof(f)); }
 
 static void WriteStringUtf8(ofstream& out, const std::string& s)
 {
     uint16_t len = static_cast<uint16_t>(s.size());
     WriteUInt16(out, len);
-    if (len > 0)
-        WriteRaw(out, s.data(), len);
+    if (len > 0) WriteRaw(out, s.data(), len);
 }
 
 // ======================================================================
@@ -68,19 +60,30 @@ struct TrackBin
 };
 
 // ======================================================================
+// 유틸
+// ======================================================================
+
+static bool IsSkeletonNode(FbxNode* node)
+{
+    if (!node) return false;
+    FbxNodeAttribute* attr = node->GetNodeAttribute();
+    return (attr && attr->GetAttributeType() == FbxNodeAttribute::eSkeleton);
+}
+
+// ======================================================================
 // FBX 키 타임 수집: node의 T/R/S 커브에서 모든 키 시간을 outTimes에 넣는다
 // ======================================================================
 
 static void CollectKeyTimes(FbxNode* node, FbxAnimLayer* layer, std::set<FbxTime>& outTimes)
 {
+    if (!node || !layer) return;
+
     auto addCurve = [&](FbxAnimCurve* curve)
         {
             if (!curve) return;
             int keyCount = curve->KeyGetCount();
             for (int i = 0; i < keyCount; ++i)
-            {
                 outTimes.insert(curve->KeyGetTime(i));
-            }
         };
 
     addCurve(node->LclTranslation.GetCurve(layer, FBXSDK_CURVENODE_COMPONENT_X));
@@ -110,6 +113,32 @@ static void TraverseAndExtractTracks(
 {
     if (!node) return;
 
+    const bool isSkeleton = IsSkeletonNode(node);
+
+    // 자식은 항상 재귀
+    auto TraverseChildren = [&]()
+        {
+            const int childCount = node->GetChildCount();
+            for (int i = 0; i < childCount; ++i)
+            {
+                TraverseAndExtractTracks(
+                    node->GetChild(i),
+                    layer,
+                    timeSpan,
+                    timeScale,
+                    tracks,
+                    nameToTrack);
+            }
+        };
+
+#if EXPORT_SKELETON_ONLY
+    if (!isSkeleton)
+    {
+        TraverseChildren();
+        return;
+    }
+#endif
+
     // 이 노드에서 키가 있는지 확인
     std::set<FbxTime> keyTimes;
     CollectKeyTimes(node, layer, keyTimes);
@@ -117,7 +146,7 @@ static void TraverseAndExtractTracks(
     if (!keyTimes.empty())
     {
         const char* nodeNameC = node->GetName();
-        std::string nodeName = nodeNameC ? nodeNameC : "";
+        std::string nodeName = (nodeNameC ? nodeNameC : "");
 
         int trackIndex = -1;
         auto it = nameToTrack.find(nodeName);
@@ -143,16 +172,21 @@ static void TraverseAndExtractTracks(
             if (t < timeSpan.GetStart() || t > timeSpan.GetStop())
                 continue;
 
+            // 로컬 TRS (DirectX + meter 변환 이후 값)
             FbxAMatrix fbxLocal = node->EvaluateLocalTransform(t);
 
-            constexpr float LENGTH_SCALE = 0.01f;
-            FbxVector4 T = fbxLocal.GetT();
-            FbxQuaternion R = fbxLocal.GetQ();
-            FbxVector4 S = fbxLocal.GetS();
+            FbxVector4     T = fbxLocal.GetT();
+            FbxQuaternion  R = fbxLocal.GetQ();
+            FbxVector4     S = fbxLocal.GetS();
+
+            // quaternion 정규화(수치 안정성)
+            R.Normalize();
 
             KeyframeBin k{};
             k.timeSec = (float)((t.GetSecondDouble() - startSec) * timeScale);
 
+            // [중요] 신버전 모델 추출기 기준: 추가 0.01 스케일 제거
+            float LENGTH_SCALE = 0.01f;
             k.tx = (float)T[0] * LENGTH_SCALE;
             k.ty = (float)T[1] * LENGTH_SCALE;
             k.tz = (float)T[2] * LENGTH_SCALE;
@@ -177,18 +211,7 @@ static void TraverseAndExtractTracks(
             });
     }
 
-    // 자식도 재귀
-    const int childCount = node->GetChildCount();
-    for (int i = 0; i < childCount; ++i)
-    {
-        TraverseAndExtractTracks(
-            node->GetChild(i),
-            layer,
-            timeSpan,
-            timeScale,
-            tracks,
-            nameToTrack);
-    }
+    TraverseChildren();
 }
 
 // ======================================================================
@@ -202,6 +225,10 @@ int main()
 
     namespace fs = std::filesystem;
 
+    // 출력 폴더 보장
+    std::error_code ec;
+    fs::create_directories(exportDir, ec);
+
     // FBX SDK 초기화
     FbxManager* manager = FbxManager::Create();
     if (!manager)
@@ -210,8 +237,8 @@ int main()
         return -1;
     }
 
-    FbxIOSettings* ios = FbxIOSettings::Create(manager, IOSROOT);
-    manager->SetIOSettings(ios);
+    FbxIOSettings* ioSettings = FbxIOSettings::Create(manager, IOSROOT);
+    manager->SetIOSettings(ioSettings);
 
     // ================================================
     // import 폴더 순회: *.fbx 전부 애니메이션 BIN 추출
@@ -221,7 +248,7 @@ int main()
         if (!entry.is_regular_file()) continue;
 
         fs::path path = entry.path();
-        if (path.extension() != ".fbx") continue;  // 혹시 모를 안전장치
+        if (path.extension() != ".fbx") continue;
 
         string name = path.stem().string();
         string fbxFileName = path.string();
@@ -243,7 +270,7 @@ int main()
         importer->Import(scene);
         importer->Destroy();
 
-        // DirectX 좌표계 변환
+        // DirectX 좌표계 + meter 단위로 변환
         FbxAxisSystem::DirectX.ConvertScene(scene);
         FbxSystemUnit::m.ConvertScene(scene);
 
@@ -260,6 +287,8 @@ int main()
             scene->Destroy();
             continue;
         }
+
+        scene->SetCurrentAnimationStack(stack);
 
         FbxTimeSpan timeSpan = stack->GetLocalTimeSpan();
         FbxAnimLayer* layer = stack->GetMember<FbxAnimLayer>(0);
@@ -278,10 +307,8 @@ int main()
         // 클립 이름
         string clipName;
         const char* stackNameC = stack->GetName();
-        if (stackNameC && stackNameC[0] != '\0')
-            clipName = stackNameC;
-        else
-            clipName = name;
+        if (stackNameC && stackNameC[0] != '\0') clipName = stackNameC;
+        else                                     clipName = name;
 
         // -----------------------------
         // Track 추출
@@ -325,6 +352,7 @@ int main()
                         [](const KeyframeBin& k) { return k.timeSec < 0.0f; }),
                     tr.keys.end());
             }
+
             duration -= minTime;
             if (duration < 0.0f) duration = 0.0f;
         }
@@ -332,7 +360,7 @@ int main()
         // -----------------------------
         // BIN 저장
         // -----------------------------
-        ofstream out(binFileName, ios::binary);
+        ofstream out(binFileName, std::ios::binary);
         if (!out.is_open())
         {
             cout << "BIN 파일 생성 실패: " << binFileName << "\n";
@@ -354,7 +382,7 @@ int main()
         for (auto& tr : tracks)
         {
             WriteStringUtf8(out, tr.boneName);
-            WriteInt32(out, -1); // boneIndex placeholder
+            WriteInt32(out, -1); // boneIndex placeholder (런타임에서 이름 매핑 권장)
 
             WriteUInt32(out, (uint32_t)tr.keys.size());
 
@@ -378,7 +406,6 @@ int main()
         }
 
         out.close();
-
         cout << "애니메이션 BIN 생성 완료: " << binFileName << "\n";
 
         scene->Destroy();

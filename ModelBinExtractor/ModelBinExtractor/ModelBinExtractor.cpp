@@ -70,6 +70,8 @@ struct SubMesh {
 vector<Bone> g_Bones;
 vector<SubMesh> g_SubMeshes;
 unordered_map<string, int> g_BoneNameToIndex;
+// [추가] 본 이름 -> 노드 포인터 캐시 (FindNodeByName 제거용)
+unordered_map<string, FbxNode*> g_BoneNameToNode;
 
 
 // ==========================================================
@@ -333,7 +335,7 @@ bool SaveModelBin(const std::string& filename)
     return true;
 }
 
-void FillSkinWeights(FbxMesh* mesh, SubMesh& sm)
+void FillSkinWeights(FbxMesh* mesh, SubMesh& sm, const std::vector<int>& vtxCpIndex)
 {
     int cpCount = mesh->GetControlPointsCount();
 
@@ -380,10 +382,14 @@ void FillSkinWeights(FbxMesh* mesh, SubMesh& sm)
     // 정점 수 = sm.vertices.size() (triangulated된 정점 기준)
     for (int v = 0; v < sm.vertices.size(); ++v)
     {
-        // polygon vertex에 대응되는 cp index
-        int cpIdx = mesh->GetPolygonVertex(v / 3, v % 3);
+        int cpIdx = (v < (int)vtxCpIndex.size()) ? vtxCpIndex[v] : -1;
+        if (cpIdx < 0 || cpIdx >= cpCount)
+        {
+            // 안전 fallback
+            for (int i = 0; i < 4; ++i) { sm.vertices[v].boneIndices[i] = 0; sm.vertices[v].boneWeights[i] = 0.0f; }
+            continue;
+        }
 
-        // influence 가져오기
         auto& inf = cpInfluences[cpIdx];
 
         // 4개 초과면 weight 큰 순으로 정렬해서 4개만
@@ -427,6 +433,7 @@ void ExtractFromFBX(FbxScene* scene)
     g_Bones.clear();
     g_SubMeshes.clear();
     g_BoneNameToIndex.clear();
+    g_BoneNameToNode.clear();
 
     // -----------------------------------------------------
     // 1) DirectX 좌표계 적용
@@ -504,6 +511,7 @@ void ExtractFromFBX(FbxScene* scene)
 
                 myIdx = (int)g_Bones.size();
                 g_BoneNameToIndex[b.name] = myIdx;
+                g_BoneNameToNode[b.name] = node;
                 g_Bones.push_back(b);
             }
 
@@ -552,10 +560,12 @@ void ExtractFromFBX(FbxScene* scene)
 
     for (int i = 0; i < boneCount; ++i)
     {
-        FbxNode* boneNode = scene->FindNodeByName(g_Bones[i].name.c_str());
+        auto itN = g_BoneNameToNode.find(g_Bones[i].name);
+        FbxNode* boneNode = (itN != g_BoneNameToNode.end()) ? itN->second : nullptr;
         if (!boneNode)
         {
             boneGlobalBind[i].SetIdentity();
+            boneHasBind[i] = false;
             continue;
         }
         constexpr double LENGTH_SCALE_D = 0.01; // double 버전(취향)
@@ -563,8 +573,11 @@ void ExtractFromFBX(FbxScene* scene)
         FbxAMatrix boneGlobal = boneNode->EvaluateGlobalTransform();
         FbxAMatrix boneInMesh = baseMeshGlobalInv * boneGlobal;
 
-        // translation만 스케일 (회전/기타 성분 건드리지 않음)
+        // translation만 0.01
         FbxVector4 t = boneInMesh.GetT();
+        t[0] *= LENGTH_SCALE_D;
+        t[1] *= LENGTH_SCALE_D;
+        t[2] *= LENGTH_SCALE_D;
         boneInMesh.SetT(t);
 
         boneGlobalBind[i] = boneInMesh;
@@ -720,35 +733,35 @@ void ExtractFromFBX(FbxScene* scene)
             }
         }
 
-        // -----------------------------------------------------
-         // [수정코드] Y=180 보정 회전 추가
-         // - Forward(Z) 반대 문제를 수동으로 맞춘다.
-         // -----------------------------------------------------
-        FbxAMatrix xform;
-        xform.SetIdentity();
-        if (node)
+        FbxAMatrix xform; xform.SetIdentity();
+        FbxAMatrix nMat;  nMat.SetIdentity();
+        bool flip = false;
+
+        // [핵심] 스킨 메시: 정점/노말 베이크 금지
+        if (!meshHasSkin[mi])
         {
-            FbxAMatrix global = node->EvaluateGlobalTransform(); // 부모 포함
-            FbxAMatrix geo = GetGeometry(node);               // geometric offset
-            xform = global * geo;
+            // static(비스킨)만 필요 시 베이크 허용
+            if (node)
+            {
+                FbxAMatrix global = node->EvaluateGlobalTransform();
+
+                // 권장: geo는 엔진이 처리 못하면 정점에 베이크할 수 있음(비스킨만)
+                // 스킨은 geo 포함하면 본 계산과 불일치하기 쉬우니 금지.
+                FbxAMatrix geo = GetGeometry(node);
+
+                xform = global * geo;
+            }
+
+            // sceneFix는 스키닝 파이프라인과 충돌 원인이었으므로 여기서는 제거
+            // (정말 필요하면 엔진에서 오브젝트 transform으로 처리)
+            // flip은 비스킨에만 유지
+            flip = (xform.Determinant() < 0.0);
+
+            nMat = xform;
+            nMat.SetT(FbxVector4(0, 0, 0, 0));
+            nMat = nMat.Inverse().Transpose();
         }
 
-        // bool flip = (xform.Determinant() < 0.0);
-
-        // [수정코드] 고정 축 보정(= Rx(180) = Y,Z 뒤집기)
-        FbxAMatrix sceneFix;
-        sceneFix.SetIdentity();
-        // X축 180도 회전: (Y,Z) 부호 반전과 동치
-        sceneFix.SetR(FbxVector4(180.0, 0.0, 0.0, 0.0));
-
-        // 월드에서 전체를 돌리고 싶으므로 왼쪽에 곱한다.
-        xform = sceneFix * xform;
-
-        // det 기반 flip은 이제 “반사”만 잡는 용도로 유지 가능
-        bool flip = (xform.Determinant() < 0.0);
-
-        // normal matrix도 "보정 후 xform"으로 다시 만든다
-        FbxAMatrix nMat = xform;
         // ==========================================================
         // [DEBUG] SubMesh per-node transform dump
         // ==========================================================
@@ -809,9 +822,6 @@ void ExtractFromFBX(FbxScene* scene)
             DLOGLN(std::string("  flip          = ") + (flip ? "true" : "false"));
         }
 
-        nMat.SetT(FbxVector4(0, 0, 0, 0));
-        nMat = nMat.Inverse().Transpose();
-
         // 스킨 없는 mesh → bone 붙이기
         int attachedBoneIndex = -1;
         if (!meshHasSkin[mi] && !g_Bones.empty())
@@ -843,6 +853,8 @@ void ExtractFromFBX(FbxScene* scene)
         bool hasUVSet = uvSetName != nullptr;
 
         // 정점 추출
+        std::vector<int> vtxCpIndex;
+        vtxCpIndex.reserve(polyCount * 3);
         for (int p = 0; p < polyCount; ++p)
         {
             int idx[3] = { 0,1,2 };
@@ -858,25 +870,45 @@ void ExtractFromFBX(FbxScene* scene)
                 // -----------------------------------------------------
                 // [수정코드] ConvertScene(m) 사용 시: 추가 스케일 제거
                  // -----------------------------------------------------
-                constexpr float LENGTH_SCALE = 1.0f;
+                constexpr float LENGTH_SCALE = 0.01f;
 
                 FbxVector4 posL = cp[cpIdx];
-                FbxVector4 posW = xform.MultT(posL);
+                FbxVector4 posOut = posL;
 
-                v.position[0] = (float)posW[0] * LENGTH_SCALE;
-                v.position[1] = (float)posW[1] * LENGTH_SCALE;
-                v.position[2] = (float)posW[2] * LENGTH_SCALE;
+                if (!meshHasSkin[mi])
+                {
+                    // 비스킨만 베이크
+                    posOut = xform.MultT(posL);
+                }
+                else
+                {
+                    // 스킨은 절대 베이크하지 않음
+                    posOut = posL;
+                }
+
+                if (!meshHasSkin[mi]) posOut = xform.MultT(posL);
+                v.position[0] = (float)posOut[0] * LENGTH_SCALE;
+                v.position[1] = (float)posOut[1] * LENGTH_SCALE;
+                v.position[2] = (float)posOut[2] * LENGTH_SCALE;
+
 
                 // normal: inverse-transpose (translation 제거한 nMat 사용)
                 FbxVector4 nL;
                 mesh->GetPolygonVertexNormal(p, idx[k], nL);
 
-                FbxVector4 nW = nMat.MultT(nL);
-                nW.Normalize();
+                FbxVector4 nOut = nL;
 
-                v.normal[0] = (float)nW[0];
-                v.normal[1] = (float)nW[1];
-                v.normal[2] = (float)nW[2];
+                if (!meshHasSkin[mi])
+                {
+                    // 비스킨만 변환
+                    nOut = nMat.MultT(nL);
+                }
+
+                nOut.Normalize();
+                v.normal[0] = (float)nOut[0];
+                v.normal[1] = (float)nOut[1];
+                v.normal[2] = (float)nOut[2];
+
 
                 // UV
                 if (hasUVSet)
@@ -910,8 +942,12 @@ void ExtractFromFBX(FbxScene* scene)
 
                 sm.vertices.push_back(v);
                 sm.indices.push_back((uint32_t)sm.indices.size());
+                vtxCpIndex.push_back(cpIdx);
             }
         }
+
+        
+
         // ==========================================================
         // [DEBUG] baked vertex AABB (overlap check) - ONCE per SubMesh
         // ==========================================================
@@ -932,7 +968,7 @@ void ExtractFromFBX(FbxScene* scene)
         // 스킨 처리
         if (meshHasSkin[mi])
         {
-            FillSkinWeights(mesh, sm);
+            FillSkinWeights(mesh, sm, vtxCpIndex); // [수정]
         }
         else
         {
