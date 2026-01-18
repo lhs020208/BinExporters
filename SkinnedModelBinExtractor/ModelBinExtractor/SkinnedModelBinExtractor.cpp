@@ -20,6 +20,17 @@ using namespace std;
 static constexpr double EXPORT_SCALE_D = 0.01;
 static constexpr float  EXPORT_SCALE_F = 0.01f;
 
+#define DEBUGLOG 1
+
+#if DEBUGLOG
+#define DLOG(x)   do { std::cout << x; } while(0)
+#define DLOGLN(x) do { std::cout << x << "\n"; } while(0)
+#else
+#define DLOG(x)   do {} while(0)
+#define DLOGLN(x) do {} while(0)
+#endif
+
+
 // ==========================================================
 // 전역 저장 데이터 (FBX 파싱 후 여기에 채움)
 // ==========================================================
@@ -501,6 +512,17 @@ static void ExtractFromFBX(FbxScene* scene)
                 CollectMaterials(node->GetChild(i));
         };
     CollectMaterials(scene->GetRootNode());
+#if DEBUGLOG
+    DLOGLN("\n[Material List]");
+    for (size_t i = 0; i < g_Materials.size(); ++i)
+    {
+        const auto& m = g_Materials[i];
+        DLOG("  ["); DLOG(i); DLOG("] ");
+        DLOG("name=\""); DLOG(m.name); DLOG("\" ");
+        DLOG("diffuse=\""); DLOG(m.diffuseTextureName); DLOGLN("\"");
+    }
+#endif
+
 
     // 10) SubMesh 생성 (스킨 메시만)
     for (int mi = 0; mi < (int)meshRefs.size(); ++mi)
@@ -591,6 +613,19 @@ static void ExtractFromFBX(FbxScene* scene)
 
         // 스킨 웨이트 채우기
         FillSkinWeights(mesh, sm, vtxCpIndex);
+
+#if DEBUGLOG
+        DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
+        DLOG("materialIndex="); DLOG(sm.materialIndex);
+
+        if (sm.materialIndex < g_Materials.size())
+        {
+            const auto& mat = g_Materials[sm.materialIndex];
+            DLOG(" ("); DLOG(mat.name); DLOG(")");
+            DLOG(" diffuse=\""); DLOG(mat.diffuseTextureName); DLOG("\"");
+        }
+        DLOGLN("");
+#endif
 
         g_SubMeshes.push_back(std::move(sm));
     }
