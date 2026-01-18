@@ -3,6 +3,7 @@
 #include <fstream>
 #include <vector>
 #include <cstdint>
+#include <cfloat>
 #include <cassert>
 #include <map>
 #include <algorithm>
@@ -732,6 +733,20 @@ void ExtractFromFBX(FbxScene* scene)
             xform = global * geo;
         }
 
+        // bool flip = (xform.Determinant() < 0.0);
+
+        // [수정코드] 고정 축 보정(= Rx(180) = Y,Z 뒤집기)
+        FbxAMatrix sceneFix;
+        sceneFix.SetIdentity();
+        // X축 180도 회전: (Y,Z) 부호 반전과 동치
+        sceneFix.SetR(FbxVector4(180.0, 0.0, 0.0, 0.0));
+
+        // 월드에서 전체를 돌리고 싶으므로 왼쪽에 곱한다.
+        xform = sceneFix * xform;
+
+        // det 기반 flip은 이제 “반사”만 잡는 용도로 유지 가능
+        bool flip = (xform.Determinant() < 0.0);
+
         // normal matrix도 "보정 후 xform"으로 다시 만든다
         FbxAMatrix nMat = xform;
         // ==========================================================
@@ -791,7 +806,7 @@ void ExtractFromFBX(FbxScene* scene)
 
             // determinant / flip
             DLOGLN(std::string("  det(xform)    = ") + std::to_string(xform.Determinant()));
-           // DLOGLN(std::string("  flip          = ") + (flip ? "true" : "false"));
+            DLOGLN(std::string("  flip          = ") + (flip ? "true" : "false"));
         }
 
         nMat.SetT(FbxVector4(0, 0, 0, 0));
@@ -831,7 +846,7 @@ void ExtractFromFBX(FbxScene* scene)
         for (int p = 0; p < polyCount; ++p)
         {
             int idx[3] = { 0,1,2 };
-            //if (flip) std::swap(idx[1], idx[2]);
+            if (flip) std::swap(idx[1], idx[2]);
 
             for (int k = 0; k < 3; ++k)
             {
