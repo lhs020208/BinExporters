@@ -24,6 +24,7 @@
     <ProjectGuid>{dc768b53-b9f7-4a37-b277-489eab8bc346}</ProjectGuid>
     <RootNamespace>ModelBinExtractor</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>StaticModelBinExtractor</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -135,7 +136,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="ModelBinExtractor.cpp" />
+    <ClCompile Include="StaticModelBinExtractor.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
