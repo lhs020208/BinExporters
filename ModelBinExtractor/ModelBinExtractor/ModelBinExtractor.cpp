@@ -15,6 +15,16 @@
 #include <fbxsdk.h>
 using namespace std;
 
+#define DEBUGLOG 1
+
+#if DEBUGLOG
+#define DLOG(x) do { std::cout << x; } while(0)
+#define DLOGLN(x) do { std::cout << x << "\n"; } while(0)
+#else
+#define DLOG(x) do {} while(0)
+#define DLOGLN(x) do {} while(0)
+#endif
+
 // ==========================================================
 // 전역 저장 데이터 (FBX 파싱 후 여기에 채움)
 // ==========================================================
@@ -105,6 +115,92 @@ static std::string SafeStemFromFbxFileName(const char* fn)
         return base;
     }
 }
+
+// ================================
+// [추가] Node의 Geometric Transform(FBX의 별도 오프셋) 반환
+// ================================
+static FbxAMatrix GetGeometry(FbxNode* node)
+{
+    FbxAMatrix geo;
+    geo.SetIdentity();
+    if (!node) return geo;
+
+    geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
+    geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
+    geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
+    return geo;
+}
+
+// ==========================================================
+// Debug print helpers
+// ==========================================================
+static void PrintVec3(const char* tag, const FbxVector4& v)
+{
+    DLOG("  "); DLOG(tag); DLOG(" = (");
+    DLOG(v[0]); DLOG(", "); DLOG(v[1]); DLOG(", "); DLOG(v[2]); DLOGLN(")");
+}
+
+static void PrintMat4(const char* tag, const FbxAMatrix& m)
+{
+    DLOGLN(std::string("  ") + tag + " =");
+    for (int r = 0; r < 4; ++r)
+    {
+        DLOG("    [");
+        for (int c = 0; c < 4; ++c)
+        {
+            DLOG(m.Get(r, c));
+            if (c != 3) DLOG(", ");
+        }
+        DLOGLN("]");
+    }
+}
+
+struct AABB
+{
+    FbxVector4 minV;
+    FbxVector4 maxV;
+};
+
+static AABB ComputeAABB_WorldBaked(const std::vector<Vertex>& verts)
+{
+    AABB aabb;
+    aabb.minV = FbxVector4(DBL_MAX, DBL_MAX, DBL_MAX, 0);
+    aabb.maxV = FbxVector4(-DBL_MAX, -DBL_MAX, -DBL_MAX, 0);
+
+    for (const auto& v : verts)
+    {
+        aabb.minV[0] = std::min<double>(aabb.minV[0], v.position[0]);
+        aabb.minV[1] = std::min<double>(aabb.minV[1], v.position[1]);
+        aabb.minV[2] = std::min<double>(aabb.minV[2], v.position[2]);
+
+        aabb.maxV[0] = std::max<double>(aabb.maxV[0], v.position[0]);
+        aabb.maxV[1] = std::max<double>(aabb.maxV[1], v.position[1]);
+        aabb.maxV[2] = std::max<double>(aabb.maxV[2], v.position[2]);
+    }
+    return aabb;
+}
+
+static void PrintAABB(const AABB& aabb)
+{
+    DLOG("  AABB.min = ("); DLOG(aabb.minV[0]); DLOG(", "); DLOG(aabb.minV[1]); DLOG(", "); DLOG(aabb.minV[2]); DLOGLN(")");
+    DLOG("  AABB.max = ("); DLOG(aabb.maxV[0]); DLOG(", "); DLOG(aabb.maxV[1]); DLOG(", "); DLOG(aabb.maxV[2]); DLOGLN(")");
+
+    FbxVector4 center(
+        (aabb.minV[0] + aabb.maxV[0]) * 0.5,
+        (aabb.minV[1] + aabb.maxV[1]) * 0.5,
+        (aabb.minV[2] + aabb.maxV[2]) * 0.5,
+        0);
+
+    FbxVector4 extent(
+        (aabb.maxV[0] - aabb.minV[0]) * 0.5,
+        (aabb.maxV[1] - aabb.minV[1]) * 0.5,
+        (aabb.maxV[2] - aabb.minV[2]) * 0.5,
+        0);
+
+    PrintVec3("AABB.center", center);
+    PrintVec3("AABB.extent", extent);
+}
+
 
 // ==========================================================
 // 파일 출력 스트림 (전역)
@@ -348,7 +444,13 @@ void ExtractFromFBX(FbxScene* scene)
     // -----------------------------------------------------
     // 3) 모든 mesh 수집 + 스킨 여부 파악
     // -----------------------------------------------------
-    vector<FbxMesh*> meshes;
+    struct MeshRef
+    {
+        FbxNode* node;
+        FbxMesh* mesh;
+    };
+
+    vector<MeshRef> meshRefs;
     vector<bool> meshHasSkin;
     vector<int> meshVertexCount;
 
@@ -358,9 +460,16 @@ void ExtractFromFBX(FbxScene* scene)
 
             if (auto* m = n->GetMesh())
             {
-                meshes.push_back(m);
+                meshRefs.push_back({ n, m });
                 meshHasSkin.push_back(m->GetDeformerCount(FbxDeformer::eSkin) > 0);
                 meshVertexCount.push_back(m->GetControlPointsCount());
+            
+#if DEBUGLOG
+                DLOGLN(std::string("[DFS] node=\"") + n->GetName() + "\""
+                    + " uid=" + std::to_string((uint64_t)n->GetUniqueID())
+                    + " meshPtr=" + std::to_string((uint64_t)m));
+#endif
+
             }
 
             for (int i = 0; i < n->GetChildCount(); ++i)
@@ -368,7 +477,7 @@ void ExtractFromFBX(FbxScene* scene)
         };
     dfs(scene->GetRootNode());
 
-    if (meshes.empty()) return;
+    if (meshRefs.empty()) return;
 
     // -----------------------------------------------------
     // 4) Bone skeleton 수집
@@ -410,7 +519,7 @@ void ExtractFromFBX(FbxScene* scene)
     int baseMeshIndex = -1;
     int maxVerts = -1;
 
-    for (int i = 0; i < meshes.size(); ++i)
+    for (int i = 0; i < (int)meshRefs.size(); ++i)
     {
         if (!meshHasSkin[i]) continue;
         if (meshVertexCount[i] > maxVerts)
@@ -422,8 +531,9 @@ void ExtractFromFBX(FbxScene* scene)
     if (baseMeshIndex < 0)
         baseMeshIndex = 0;
 
-    FbxMesh* baseMesh = meshes[baseMeshIndex];
-    FbxNode* baseNode = baseMesh->GetNode();
+    FbxMesh* baseMesh = meshRefs[baseMeshIndex].mesh;
+    FbxNode* baseNode = meshRefs[baseMeshIndex].node; // ★ mesh->GetNode() 쓰지 말 것
+
 
     // -----------------------------------------------------
     // 6) boneGlobalBind 계산
@@ -454,9 +564,6 @@ void ExtractFromFBX(FbxScene* scene)
 
         // translation만 스케일 (회전/기타 성분 건드리지 않음)
         FbxVector4 t = boneInMesh.GetT();
-        t[0] *= LENGTH_SCALE_D;
-        t[1] *= LENGTH_SCALE_D;
-        t[2] *= LENGTH_SCALE_D;
         boneInMesh.SetT(t);
 
         boneGlobalBind[i] = boneInMesh;
@@ -558,14 +665,16 @@ void ExtractFromFBX(FbxScene* scene)
 
     CollectMaterials(scene->GetRootNode());
     {
-        cout << "\n[Material List]\n";
+#if DEBUGLOG
+        std::cout << "\n[Material List]\n";
         for (size_t i = 0; i < g_Materials.size(); ++i)
         {
             const auto& m = g_Materials[i];
-            cout << "  [" << i << "] "
+            std::cout << "  [" << i << "] "
                 << "name=\"" << m.name << "\" "
                 << "diffuse=\"" << m.diffuseTextureName << "\"\n";
         }
+#endif
     }
 
 
@@ -582,20 +691,21 @@ void ExtractFromFBX(FbxScene* scene)
         return out;
         };
 
-    for (int mi = 0; mi < meshes.size(); ++mi)
+    for (int mi = 0; mi < (int)meshRefs.size(); ++mi)
     {
-        FbxMesh* mesh = meshes[mi];
-        if (!mesh) continue;
+        FbxMesh* mesh = meshRefs[mi].mesh;
+        FbxNode* node = meshRefs[mi].node;
+        if (!mesh || !node) continue;
 
         SubMesh sm;
 
         // 이름
-        FbxNode* node = mesh->GetNode();
-        sm.meshName = node ? node->GetName() : "Unnamed";
-        sm.materialIndex = 0; // default
+        sm.meshName = node->GetName();
+        sm.materialIndex = 0;
 
         if (node)
         {
+            // 재질
             int matCount = node->GetMaterialCount();
             if (matCount > 0)
             {
@@ -609,17 +719,133 @@ void ExtractFromFBX(FbxScene* scene)
             }
         }
 
-        // flip 검사
-        FbxAMatrix global = node ? node->EvaluateGlobalTransform() : FbxAMatrix();
-        FbxAMatrix geo;
+        // -----------------------------------------------------
+         // [수정코드] Y=180 보정 회전 추가
+         // - Forward(Z) 반대 문제를 수동으로 맞춘다.
+         // -----------------------------------------------------
+        FbxAMatrix xform;
+        xform.SetIdentity();
         if (node)
         {
-            geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
-            geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
-            geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
+            FbxAMatrix global = node->EvaluateGlobalTransform(); // 부모 포함
+            FbxAMatrix geo = GetGeometry(node);                  // geometric offset
+            xform = global * geo;
         }
-        FbxAMatrix xform = global * geo;
+
+        // -----------------------------------------------------
+        // [수정코드] Up/Forward 방향을 보고 "필요할 때만" 보정
+        // - expectedUp     : (0,1,0)
+        // - expectedForward: 엔진 기준에 맞춰 +Z 또는 -Z 중 하나 선택
+        //   (너는 지금 180도 돌아가 보인다고 했으니, 엔진이 -Z forward일 가능성이 큼)
+        // -----------------------------------------------------
+        const FbxVector4 expectedUp(0, 1, 0, 0);
+        const FbxVector4 expectedForward(0, 0, -1, 0); // 필요하면 (0,0, +1,0)로 바꿔라
+
+        auto Normalize3 = [](FbxVector4 v) {
+            double len = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (len > 1e-12) { v[0] /= len; v[1] /= len; v[2] /= len; }
+            return v;
+            };
+        auto Dot3 = [](const FbxVector4& a, const FbxVector4& b) {
+            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+            };
+
+        // translation 제거한 RS 행렬로 방향 벡터만 검사
+        FbxAMatrix rs = xform;
+        rs.SetT(FbxVector4(0, 0, 0, 0));
+
+        // 현재 Up/Forward 추정
+        FbxVector4 upW = Normalize3(rs.MultT(FbxVector4(0, 1, 0, 0)));
+        FbxVector4 fwdW = Normalize3(rs.MultT(FbxVector4(0, 0, 1, 0)));
+
+        // (1) Up이 거꾸로면: 180도 뒤집기 (X축 180 추천)
+        if (Dot3(upW, expectedUp) < 0.0)
+        {
+            FbxAMatrix fixUp;
+            fixUp.SetIdentity();
+            fixUp.SetR(FbxVector4(180.0, 0.0, 0.0)); // 상하 뒤집힘 교정
+            xform = fixUp * xform;
+
+            // 갱신
+            rs = xform; rs.SetT(FbxVector4(0, 0, 0, 0));
+            fwdW = Normalize3(rs.MultT(FbxVector4(0, 0, 1, 0)));
+        }
+
+        // (2) Forward가 반대면: Y 180
+        if (Dot3(fwdW, expectedForward) < 0.0)
+        {
+            FbxAMatrix fixYaw;
+            fixYaw.SetIdentity();
+            fixYaw.SetR(FbxVector4(0.0, 180.0, 0.0));
+            xform = fixYaw * xform;
+        }
+
+
         bool flip = (xform.Determinant() < 0);
+
+        // normal matrix도 "보정 후 xform"으로 다시 만든다
+        FbxAMatrix nMat = xform;
+        // ==========================================================
+        // [DEBUG] SubMesh per-node transform dump
+        // ==========================================================
+        if (DEBUGLOG)
+        {
+            DLOGLN("--------------------------------------------------");
+            DLOGLN(std::string("[SubMesh Debug] index=") + std::to_string(mi));
+
+            // 기본 식별
+            DLOGLN(std::string("  nodeName      = \"") + (node ? node->GetName() : "null") + "\"");
+            DLOGLN(std::string("  meshName(out)  = \"") + sm.meshName + "\"");
+
+            // 노드 Unique ID (중복 이름 구분용)
+            if (node)
+            {
+                DLOGLN(std::string("  nodeUID       = ") + std::to_string((uint64_t)node->GetUniqueID()));
+                FbxNode* parent = node->GetParent();
+                DLOGLN(std::string("  parentName    = \"") + (parent ? parent->GetName() : "null") + "\"");
+                if (parent) DLOGLN(std::string("  parentUID     = ") + std::to_string((uint64_t)parent->GetUniqueID()));
+            }
+
+            // 재질
+            DLOGLN(std::string("  materialIndex = ") + std::to_string(sm.materialIndex));
+            if (sm.materialIndex < g_Materials.size())
+            {
+                DLOGLN(std::string("  materialName  = \"") + g_Materials[sm.materialIndex].name + "\"");
+                DLOGLN(std::string("  diffuse       = \"") + g_Materials[sm.materialIndex].diffuseTextureName + "\"");
+            }
+
+            // 스킨 여부
+            DLOGLN(std::string("  hasSkin       = ") + (meshHasSkin[mi] ? "true" : "false"));
+
+            // 로컬/글로벌/지오메트릭
+            if (node)
+            {
+                FbxAMatrix local = node->EvaluateLocalTransform();
+                FbxAMatrix global = node->EvaluateGlobalTransform();
+                FbxAMatrix geo = GetGeometry(node);
+
+                PrintMat4("LocalTransform", local);
+                PrintMat4("GlobalTransform", global);
+                PrintMat4("Geometric(Offset)", geo);
+            }
+
+            // 최종 베이크 행렬
+            PrintMat4("BakedXForm(xform)", xform);
+
+            // 방향 벡터(베이크 후)
+            FbxAMatrix rs = xform; rs.SetT(FbxVector4(0, 0, 0, 0));
+            FbxVector4 upW = rs.MultT(FbxVector4(0, 1, 0, 0));
+            FbxVector4 fwdW = rs.MultT(FbxVector4(0, 0, 1, 0));
+            PrintVec3("UpWorld", upW);
+            PrintVec3("FwdWorld", fwdW);
+
+            // determinant / flip
+            DLOGLN(std::string("  det(xform)    = ") + std::to_string(xform.Determinant()));
+            DLOGLN(std::string("  flip          = ") + (flip ? "true" : "false"));
+        }
+
+        nMat.SetT(FbxVector4(0, 0, 0, 0));
+        nMat = nMat.Inverse().Transpose();
 
         // 스킨 없는 mesh → bone 붙이기
         int attachedBoneIndex = -1;
@@ -655,7 +881,7 @@ void ExtractFromFBX(FbxScene* scene)
         for (int p = 0; p < polyCount; ++p)
         {
             int idx[3] = { 0,1,2 };
-            if (flip) std::swap(idx[1], idx[2]);
+            //if (flip) std::swap(idx[1], idx[2]);
 
             for (int k = 0; k < 3; ++k)
             {
@@ -664,20 +890,28 @@ void ExtractFromFBX(FbxScene* scene)
 
                 Vertex v{};
 
-                // pos
-                constexpr float LENGTH_SCALE = 0.01f; // 100 -> 1
+                // -----------------------------------------------------
+                // [수정코드] ConvertScene(m) 사용 시: 추가 스케일 제거
+                 // -----------------------------------------------------
+                constexpr float LENGTH_SCALE = 1.0f;
 
-                FbxVector4 pos = cp[cpIdx];
-                v.position[0] = (float)pos[0] * LENGTH_SCALE;
-                v.position[1] = (float)pos[1] * LENGTH_SCALE;
-                v.position[2] = (float)pos[2] * LENGTH_SCALE;
+                FbxVector4 posL = cp[cpIdx];
+                FbxVector4 posW = xform.MultT(posL);
 
-                // normal
-                FbxVector4 n;
-                mesh->GetPolygonVertexNormal(p, idx[k], n);
-                v.normal[0] = (float)n[0];
-                v.normal[1] = (float)n[1];
-                v.normal[2] = (float)n[2];
+                v.position[0] = (float)posW[0] * LENGTH_SCALE;
+                v.position[1] = (float)posW[1] * LENGTH_SCALE;
+                v.position[2] = (float)posW[2] * LENGTH_SCALE;
+
+                // normal: inverse-transpose (translation 제거한 nMat 사용)
+                FbxVector4 nL;
+                mesh->GetPolygonVertexNormal(p, idx[k], nL);
+
+                FbxVector4 nW = nMat.MultT(nL);
+                nW.Normalize();
+
+                v.normal[0] = (float)nW[0];
+                v.normal[1] = (float)nW[1];
+                v.normal[2] = (float)nW[2];
 
                 // UV
                 if (hasUVSet)
@@ -713,6 +947,22 @@ void ExtractFromFBX(FbxScene* scene)
                 sm.indices.push_back((uint32_t)sm.indices.size());
             }
         }
+        // ==========================================================
+        // [DEBUG] baked vertex AABB (overlap check) - ONCE per SubMesh
+        // ==========================================================
+#if DEBUGLOG
+        DLOGLN("  [Baked Vertex AABB] (final)");
+        if (!sm.vertices.empty())
+        {
+            AABB aabb = ComputeAABB_WorldBaked(sm.vertices);
+            PrintAABB(aabb);
+        }
+        else
+        {
+            DLOGLN("  (no vertices)");
+        }
+#endif
+
 
         // 스킨 처리
         if (meshHasSkin[mi])
@@ -732,17 +982,16 @@ void ExtractFromFBX(FbxScene* scene)
             }
         }
         {
-            cout << "[SubMesh] "
+#if DEBUGLOG
+            std::cout << "[SubMesh] "
                 << "mesh=\"" << sm.meshName << "\" "
                 << "materialIndex=" << sm.materialIndex;
 
             if (sm.materialIndex < g_Materials.size())
-            {
-                cout << " ("
-                    << g_Materials[sm.materialIndex].name
-                    << ")";
-            }
-            cout << "\n";
+                std::cout << " (" << g_Materials[sm.materialIndex].name << ")";
+
+            std::cout << "\n";
+#endif
         }
 
 
