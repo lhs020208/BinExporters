@@ -728,60 +728,9 @@ void ExtractFromFBX(FbxScene* scene)
         if (node)
         {
             FbxAMatrix global = node->EvaluateGlobalTransform(); // 부모 포함
-            FbxAMatrix geo = GetGeometry(node);                  // geometric offset
+            FbxAMatrix geo = GetGeometry(node);               // geometric offset
             xform = global * geo;
         }
-
-        // -----------------------------------------------------
-        // [수정코드] Up/Forward 방향을 보고 "필요할 때만" 보정
-        // - expectedUp     : (0,1,0)
-        // - expectedForward: 엔진 기준에 맞춰 +Z 또는 -Z 중 하나 선택
-        //   (너는 지금 180도 돌아가 보인다고 했으니, 엔진이 -Z forward일 가능성이 큼)
-        // -----------------------------------------------------
-        const FbxVector4 expectedUp(0, 1, 0, 0);
-        const FbxVector4 expectedForward(0, 0, -1, 0); // 필요하면 (0,0, +1,0)로 바꿔라
-
-        auto Normalize3 = [](FbxVector4 v) {
-            double len = sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-            if (len > 1e-12) { v[0] /= len; v[1] /= len; v[2] /= len; }
-            return v;
-            };
-        auto Dot3 = [](const FbxVector4& a, const FbxVector4& b) {
-            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-            };
-
-        // translation 제거한 RS 행렬로 방향 벡터만 검사
-        FbxAMatrix rs = xform;
-        rs.SetT(FbxVector4(0, 0, 0, 0));
-
-        // 현재 Up/Forward 추정
-        FbxVector4 upW = Normalize3(rs.MultT(FbxVector4(0, 1, 0, 0)));
-        FbxVector4 fwdW = Normalize3(rs.MultT(FbxVector4(0, 0, 1, 0)));
-
-        // (1) Up이 거꾸로면: 180도 뒤집기 (X축 180 추천)
-        if (Dot3(upW, expectedUp) < 0.0)
-        {
-            FbxAMatrix fixUp;
-            fixUp.SetIdentity();
-            fixUp.SetR(FbxVector4(180.0, 0.0, 0.0)); // 상하 뒤집힘 교정
-            xform = fixUp * xform;
-
-            // 갱신
-            rs = xform; rs.SetT(FbxVector4(0, 0, 0, 0));
-            fwdW = Normalize3(rs.MultT(FbxVector4(0, 0, 1, 0)));
-        }
-
-        // (2) Forward가 반대면: Y 180
-        if (Dot3(fwdW, expectedForward) < 0.0)
-        {
-            FbxAMatrix fixYaw;
-            fixYaw.SetIdentity();
-            fixYaw.SetR(FbxVector4(0.0, 180.0, 0.0));
-            xform = fixYaw * xform;
-        }
-
-
-        bool flip = (xform.Determinant() < 0);
 
         // normal matrix도 "보정 후 xform"으로 다시 만든다
         FbxAMatrix nMat = xform;
@@ -833,6 +782,7 @@ void ExtractFromFBX(FbxScene* scene)
             PrintMat4("BakedXForm(xform)", xform);
 
             // 방향 벡터(베이크 후)
+           // 방향 벡터(베이크 후)
             FbxAMatrix rs = xform; rs.SetT(FbxVector4(0, 0, 0, 0));
             FbxVector4 upW = rs.MultT(FbxVector4(0, 1, 0, 0));
             FbxVector4 fwdW = rs.MultT(FbxVector4(0, 0, 1, 0));
@@ -841,7 +791,7 @@ void ExtractFromFBX(FbxScene* scene)
 
             // determinant / flip
             DLOGLN(std::string("  det(xform)    = ") + std::to_string(xform.Determinant()));
-            DLOGLN(std::string("  flip          = ") + (flip ? "true" : "false"));
+           // DLOGLN(std::string("  flip          = ") + (flip ? "true" : "false"));
         }
 
         nMat.SetT(FbxVector4(0, 0, 0, 0));
