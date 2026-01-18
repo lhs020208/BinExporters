@@ -15,8 +15,10 @@
 
 #include <fbxsdk.h>
 using namespace std;
+static constexpr double EXPORT_SCALE_D = 0.01;
+static constexpr float  EXPORT_SCALE_F = 0.01f;
 
-#define DEBUGLOG 1
+#define DEBUGLOG 0
 
 #if DEBUGLOG
 #define DLOG(x) do { std::cout << x; } while(0)
@@ -568,16 +570,15 @@ void ExtractFromFBX(FbxScene* scene)
             boneHasBind[i] = false;
             continue;
         }
-        constexpr double LENGTH_SCALE_D = 0.01; // double 버전(취향)
-
+        
         FbxAMatrix boneGlobal = boneNode->EvaluateGlobalTransform();
         FbxAMatrix boneInMesh = baseMeshGlobalInv * boneGlobal;
 
         // translation만 0.01
         FbxVector4 t = boneInMesh.GetT();
-        t[0] *= LENGTH_SCALE_D;
-        t[1] *= LENGTH_SCALE_D;
-        t[2] *= LENGTH_SCALE_D;
+        t[0] *= EXPORT_SCALE_D;
+        t[1] *= EXPORT_SCALE_D;
+        t[2] *= EXPORT_SCALE_D;
         boneInMesh.SetT(t);
 
         boneGlobalBind[i] = boneInMesh;
@@ -762,6 +763,29 @@ void ExtractFromFBX(FbxScene* scene)
             nMat = nMat.Inverse().Transpose();
         }
 
+        float unitScaleComp = 1.0f; // default: 보정 없음
+
+        if (!meshHasSkin[mi]) // 비스킨만
+        {
+            FbxVector4 s = xform.GetS();
+            double sx = s[0], sy = s[1], sz = s[2];
+
+            auto nearEq = [](double a, double b, double eps = 1e-4) { return fabs(a - b) < eps; };
+
+            // uniform scale일 때만
+            if (nearEq(sx, sy) && nearEq(sx, sz))
+            {
+                double u = sx;
+
+                // “유닛 변환 스케일”로 보이는 값만 상쇄 (0.01 또는 100 근처)
+                if (fabs(u - 0.01) < 1e-3 || fabs(u - 100.0) < 1e-2)
+                {
+                    unitScaleComp = (float)(1.0 / u);
+                }
+            }
+        }
+
+
         // ==========================================================
         // [DEBUG] SubMesh per-node transform dump
         // ==========================================================
@@ -870,26 +894,19 @@ void ExtractFromFBX(FbxScene* scene)
                 // -----------------------------------------------------
                 // [수정코드] ConvertScene(m) 사용 시: 추가 스케일 제거
                  // -----------------------------------------------------
-                constexpr float LENGTH_SCALE = 0.01f;
-
                 FbxVector4 posL = cp[cpIdx];
                 FbxVector4 posOut = posL;
 
                 if (!meshHasSkin[mi])
-                {
-                    // 비스킨만 베이크
                     posOut = xform.MultT(posL);
-                }
                 else
-                {
-                    // 스킨은 절대 베이크하지 않음
                     posOut = posL;
-                }
 
-                if (!meshHasSkin[mi]) posOut = xform.MultT(posL);
-                v.position[0] = (float)posOut[0] * LENGTH_SCALE;
-                v.position[1] = (float)posOut[1] * LENGTH_SCALE;
-                v.position[2] = (float)posOut[2] * LENGTH_SCALE;
+                float finalScale = EXPORT_SCALE_F * unitScaleComp;
+
+                v.position[0] = (float)posOut[0] * finalScale;
+                v.position[1] = (float)posOut[1] * finalScale;
+                v.position[2] = (float)posOut[2] * finalScale;
 
 
                 // normal: inverse-transpose (translation 제거한 nMat 사용)

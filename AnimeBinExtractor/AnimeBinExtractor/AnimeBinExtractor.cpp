@@ -11,6 +11,7 @@
 #include <cfloat>   // FLT_MAX
 
 using namespace std;
+static constexpr float EXPORT_SCALE_F = 0.01f;
 
 // =========================================================
 // 옵션
@@ -186,10 +187,9 @@ static void TraverseAndExtractTracks(
             k.timeSec = (float)((t.GetSecondDouble() - startSec) * timeScale);
 
             // [중요] 신버전 모델 추출기 기준: 추가 0.01 스케일 제거
-            float LENGTH_SCALE = 0.01f;
-            k.tx = (float)T[0] * LENGTH_SCALE;
-            k.ty = (float)T[1] * LENGTH_SCALE;
-            k.tz = (float)T[2] * LENGTH_SCALE;
+            k.tx = (float)T[0] * EXPORT_SCALE_F;
+            k.ty = (float)T[1] * EXPORT_SCALE_F;
+            k.tz = (float)T[2] * EXPORT_SCALE_F;
 
             k.rx = (float)R[0];
             k.ry = (float)R[1];
