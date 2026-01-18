@@ -27,7 +27,7 @@ using namespace std;
 
 static constexpr float FINAL_SCALE_F = 1.0f; // ConvertScene(m) 사용 시 1.0 권장
 
-#define DEBUGLOG 0
+#define DEBUGLOG 1
 
 #if DEBUGLOG
 #define DLOG(x) do { std::cout << x; } while(0)
@@ -288,6 +288,16 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
                 CollectMaterials(node->GetChild(i));
         };
     CollectMaterials(scene->GetRootNode());
+#if DEBUGLOG
+    DLOGLN("\n[Material List]");
+    for (size_t i = 0; i < g_Materials.size(); ++i)
+    {
+        const auto& m = g_Materials[i];
+        DLOG("  ["); DLOG(i); DLOG("] ");
+        DLOG("name=\""); DLOG(m.name); DLOG("\" ");
+        DLOG("diffuse=\""); DLOG(m.diffuseTextureName); DLOGLN("\"");
+    }
+#endif
 
     // 4) 모든 mesh 수집 후 "비스킨만" 처리
     struct MeshRef { FbxNode* node; FbxMesh* mesh; bool hasSkin; };
@@ -431,7 +441,22 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
 
         // 빈 메시 방지
         if (!sm.vertices.empty())
+        {
+#if DEBUGLOG
+            DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
+            DLOG("materialIndex="); DLOG(sm.materialIndex);
+
+            if (sm.materialIndex < g_Materials.size())
+            {
+                const auto& mat = g_Materials[sm.materialIndex];
+                DLOG(" ("); DLOG(mat.name); DLOG(")");
+                DLOG(" diffuse=\""); DLOG(mat.diffuseTextureName); DLOG("\"");
+            }
+            DLOGLN("");
+#endif
             g_SubMeshes.push_back(std::move(sm));
+        }
+
     }
 }
 
