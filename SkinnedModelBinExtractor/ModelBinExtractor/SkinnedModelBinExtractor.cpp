@@ -315,7 +315,7 @@ static void ExtractFromFBX(FbxScene* scene)
     g_BoneNameToNode.clear();
 
     // 1) DirectX 좌표계 + meter 단위
-    FbxAxisSystem::DirectX.ConvertScene(scene);
+    //FbxAxisSystem::DirectX.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
 
     // 2) Triangulate
@@ -558,61 +558,110 @@ static void ExtractFromFBX(FbxScene* scene)
         const char* uvSetName = (uvSetNames.GetCount() > 0) ? uvSetNames[0] : nullptr;
         bool hasUVSet = (uvSetName != nullptr);
 
-        // 정점 추출 (스킨용: 베이크/flip/노말 변환 없음, EXPORT_SCALE_F만 적용)
+        // === 변환행렬 준비 (base mesh 공간) ===
+        FbxAMatrix baseG;
+        if (baseNode) baseG = baseNode->EvaluateGlobalTransform();
+        else          baseG.SetIdentity();
+        FbxAMatrix baseInv = baseG.Inverse();
+
+        FbxAMatrix meshG = node->EvaluateGlobalTransform();
+
+        // Geometric transform (FBX에서 메시 노드에만 붙는 별도 오프셋)
+        FbxAMatrix geo; geo.SetIdentity();
+        geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
+        geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
+        geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
+
+        // 정점은 "base mesh 기준 공간"으로 통일
+        FbxAMatrix toBase = baseInv * meshG * geo;
+
+        // 미러링(det<0)이면 winding을 뒤집어야 좌우/앞뒤가 정상
+        auto Det3x3 = [](const FbxAMatrix& m) -> double
+            {
+                double a = m.Get(0, 0), b = m.Get(0, 1), c = m.Get(0, 2);
+                double d = m.Get(1, 0), e = m.Get(1, 1), f = m.Get(1, 2);
+                double g = m.Get(2, 0), h = m.Get(2, 1), i = m.Get(2, 2);
+                return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+            };
+        bool flipWinding = (Det3x3(meshG * geo) < 0.0);
+
+        // 정점/인덱스
         std::vector<int> vtxCpIndex;
         vtxCpIndex.reserve(polyCount * 3);
 
         for (int p = 0; p < polyCount; ++p)
         {
+            // triangulated라 3개 고정
+            Vertex triV[3]{};
+            int    triCp[3]{ -1,-1,-1 };
+
             for (int k = 0; k < 3; ++k)
             {
                 int cpIdx = mesh->GetPolygonVertex(p, k);
-                if (cpIdx < 0 || cpIdx >= cpCount) continue;
+                triCp[k] = cpIdx;
 
-                Vertex v{}; // zero init
+                // position (base 공간으로 변환)
+                FbxVector4 p4 = toBase.MultT(cp[cpIdx]);
+                triV[k].position[0] = (float)p4[0] * EXPORT_SCALE_F;
+                triV[k].position[1] = (float)p4[1] * EXPORT_SCALE_F;
+                triV[k].position[2] = (float)p4[2] * EXPORT_SCALE_F;
 
-                // position
-                FbxVector4 posL = cp[cpIdx];
-                v.position[0] = (float)posL[0] * EXPORT_SCALE_F;
-                v.position[1] = (float)posL[1] * EXPORT_SCALE_F;
-                v.position[2] = (float)posL[2] * EXPORT_SCALE_F;
-
-                // normal (스킨용: 그대로)
+                // normal (벡터 변환: w=0)
                 FbxVector4 nL;
                 mesh->GetPolygonVertexNormal(p, k, nL);
-                nL.Normalize();
-                v.normal[0] = (float)nL[0];
-                v.normal[1] = (float)nL[1];
-                v.normal[2] = (float)nL[2];
+                FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
+                FbxVector4 nW = toBase.MultT(n4);
+                nW.Normalize();
+                triV[k].normal[0] = (float)nW[0];
+                triV[k].normal[1] = (float)nW[1];
+                triV[k].normal[2] = (float)nW[2];
 
                 // UV
                 if (hasUVSet)
                 {
-                    FbxVector2 uv;
-                    bool unmapped = false;
+                    FbxVector2 uv; bool unmapped = false;
                     if (mesh->GetPolygonVertexUV(p, k, uvSetName, uv, unmapped))
                     {
-                        v.uv[0] = (float)uv[0];
-                        v.uv[1] = 1.0f - (float)uv[1];
+                        triV[k].uv[0] = (float)uv[0];
+                        triV[k].uv[1] = 1.0f - (float)uv[1];
                     }
                     else
                     {
-                        v.uv[0] = v.uv[1] = 0.0f;
+                        triV[k].uv[0] = triV[k].uv[1] = 0.0f;
                     }
                 }
                 else
                 {
-                    v.uv[0] = v.uv[1] = 0.0f;
+                    triV[k].uv[0] = triV[k].uv[1] = 0.0f;
                 }
+            }
 
-                sm.vertices.push_back(v);
-                sm.indices.push_back((uint32_t)sm.indices.size());
-                vtxCpIndex.push_back(cpIdx);
+            // push vertices
+            uint32_t base = (uint32_t)sm.vertices.size();
+            for (int k = 0; k < 3; ++k)
+            {
+                sm.vertices.push_back(triV[k]);
+                vtxCpIndex.push_back(triCp[k]);
+            }
+
+            // push indices (미러링이면 winding swap)
+            if (!flipWinding)
+            {
+                sm.indices.push_back(base + 0);
+                sm.indices.push_back(base + 1);
+                sm.indices.push_back(base + 2);
+            }
+            else
+            {
+                sm.indices.push_back(base + 0);
+                sm.indices.push_back(base + 2);
+                sm.indices.push_back(base + 1);
             }
         }
 
-        // 스킨 웨이트 채우기
+        // 스킨 웨이트 채우기 (cp 인덱스 매핑은 그대로 사용)
         FillSkinWeights(mesh, sm, vtxCpIndex);
+
 
 #if DEBUGLOG
         DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
