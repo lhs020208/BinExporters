@@ -406,24 +406,16 @@ static void ExtractFromFBX(FbxScene* scene)
 
     FbxNode* baseNode = meshRefs[baseMeshIndex].node;
 
-    // 6) boneGlobalBind 계산 (base mesh 기준 좌표)
+    // 6) boneGlobalBind 계산 (base mesh 기준, EvaluateGlobalTransform 기반)
     vector<FbxAMatrix> boneGlobalBind(boneCount);
     vector<bool> boneHasBind(boneCount, false);
 
-    FbxAMatrix baseMeshGlobal;
-    if (baseNode) baseMeshGlobal = baseNode->EvaluateGlobalTransform();
-    else          baseMeshGlobal.SetIdentity();
+    FbxAMatrix baseG; baseG.SetIdentity();
+    if (baseNode) baseG = baseNode->EvaluateGlobalTransform();
+    FbxAMatrix baseInv = baseG.Inverse();
 
-    double baseDet = Det3x3(baseMeshGlobal);
-    bool globalMirrorX = (baseDet < 0.0);
-
-#if DEBUGLOG
-    DLOG("[BaseDet] "); DLOG(baseNode ? baseNode->GetName() : "null");
-    DLOG(" det="); DLOGLN(baseDet);
-#endif
-    FbxAMatrix baseMeshGlobalInv = baseMeshGlobal.Inverse();
-    FbxAMatrix S;
-    S.SetIdentity();
+    // X 반사 행렬 S
+    FbxAMatrix S; S.SetIdentity();
     S.SetRow(0, FbxVector4(-1, 0, 0, 0));
     S.SetRow(1, FbxVector4(0, 1, 0, 0));
     S.SetRow(2, FbxVector4(0, 0, 1, 0));
@@ -441,21 +433,48 @@ static void ExtractFromFBX(FbxScene* scene)
             continue;
         }
 
+        // FBX global (bind pose 시점)
         FbxAMatrix boneGlobal = boneNode->EvaluateGlobalTransform();
-        FbxAMatrix boneInMesh = baseMeshGlobalInv * boneGlobal;
 
-        // translation만 0.01
-        FbxVector4 t = boneInMesh.GetT();
+        // base 공간으로 내림
+        FbxAMatrix boneInBase = baseInv * boneGlobal;
+
+        // 스케일: translation만 0.01
+        FbxVector4 t = boneInBase.GetT();
         t[0] *= EXPORT_SCALE_D;
         t[1] *= EXPORT_SCALE_D;
         t[2] *= EXPORT_SCALE_D;
-        boneInMesh.SetT(t);
-        if (FLIP_X_TO_MATCH_UNITY)
-            boneInMesh = S * boneInMesh * S;
+        boneInBase.SetT(t);
 
-        boneGlobalBind[i] = boneInMesh;
+        // 정점을 X flip 했으면, bind도 "같은 공간"으로 맞춰야 함
+        // (정점은 p4.x = -p4.x == S 적용이므로, 본 변환은 공액변환 S*M*S)
+        if (FLIP_X_TO_MATCH_UNITY)
+            boneInBase = S * boneInBase * S;
+
+        boneGlobalBind[i] = boneInBase;
         boneHasBind[i] = true;
     }
+
+#if DEBUGLOG
+    {
+        int missing = 0;
+        for (int i = 0; i < boneCount; ++i)
+            if (!boneHasBind[i]) missing++;
+
+        DLOG("[BindMissing] "); DLOG(missing);
+        DLOG(" / "); DLOGLN(boneCount);
+    }
+#endif
+#if DEBUGLOG
+    {
+        int bi = 0; // 0번 본이 root가 아닐 수도 있지만, 일단 0으로 시작
+        double det = Det3x3(boneGlobalBind[bi]);
+        FbxVector4 t = boneGlobalBind[bi].GetT();
+
+        DLOG("[Bind0] det="); DLOG(det);
+        DLOG(" T=("); DLOG(t[0]); DLOG(","); DLOG(t[1]); DLOG(","); DLOG(t[2]); DLOGLN(")");
+    }
+#endif
 
     // 7) bindLocal 계산
     for (int i = 0; i < boneCount; ++i)
@@ -474,7 +493,17 @@ static void ExtractFromFBX(FbxScene* scene)
         else                          parentM.SetIdentity();
 
         FbxAMatrix local = parentM.Inverse() * boneGlobalBind[i];
-
+#if DEBUGLOG
+        {
+            double ldet = Det3x3(local);
+            if (ldet < 0.0)
+            {
+                DLOG("[LocalDetNeg] i="); DLOG(i);
+                DLOG(" name="); DLOG(g_Bones[i].name);
+                DLOG(" det="); DLOGLN(ldet);
+            }
+        }
+#endif
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 g_Bones[i].bindLocal[r * 4 + c] = (float)local.Get(r, c);
@@ -489,6 +518,13 @@ static void ExtractFromFBX(FbxScene* scene)
             for (int c = 0; c < 4; ++c)
                 g_Bones[i].offsetMatrix[r * 4 + c] = (float)off.Get(r, c);
     }
+#if DEBUGLOG
+    {
+        int bi = 0;
+        double det = Det3x3(boneGlobalBind[bi].Inverse());
+        DLOG("[Offset0] det="); DLOGLN(det);
+    }
+#endif
 
     // 9) Material + Diffuse Texture 수집 (전체 노드에서 수집해도 무방)
     g_Materials.clear();
