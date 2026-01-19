@@ -12,6 +12,18 @@
 
 using namespace std;
 static constexpr float EXPORT_SCALE_F = 0.01f;
+static constexpr bool MIRROR_X_EXPORT = true; // 모델 추출기와 동일 옵션
+
+static FbxAMatrix MakeMirrorX()
+{
+    FbxAMatrix S; S.SetIdentity();
+    S.SetRow(0, FbxVector4(-1, 0, 0, 0));
+    S.SetRow(1, FbxVector4(0, 1, 0, 0));
+    S.SetRow(2, FbxVector4(0, 0, 1, 0));
+    S.SetRow(3, FbxVector4(0, 0, 0, 1));
+    return S;
+}
+
 
 // =========================================================
 // 옵션
@@ -40,6 +52,8 @@ static void WriteStringUtf8(ofstream& out, const std::string& s)
     WriteUInt16(out, len);
     if (len > 0) WriteRaw(out, s.data(), len);
 }
+
+
 
 // ======================================================================
 // 애니메이션용 임시 구조체
@@ -175,6 +189,11 @@ static void TraverseAndExtractTracks(
 
             // 로컬 TRS (DirectX + meter 변환 이후 값)
             FbxAMatrix fbxLocal = node->EvaluateLocalTransform(t);
+            if (MIRROR_X_EXPORT)
+            {
+                static FbxAMatrix Sx = MakeMirrorX();
+                fbxLocal = Sx * fbxLocal * Sx;   // ★ 모델 추출기와 동일한 공액변환
+            }
 
             FbxVector4     T = fbxLocal.GetT();
             FbxQuaternion  R = fbxLocal.GetQ();
