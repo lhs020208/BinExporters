@@ -30,6 +30,14 @@ static constexpr float  EXPORT_SCALE_F = 0.01f;
 #define DLOGLN(x) do {} while(0)
 #endif
 
+static double Det3x3(const FbxAMatrix & m)
+{
+    double a = m.Get(0, 0), b = m.Get(0, 1), c = m.Get(0, 2);
+    double d = m.Get(1, 0), e = m.Get(1, 1), f = m.Get(1, 2);
+    double g = m.Get(2, 0), h = m.Get(2, 1), i = m.Get(2, 2);
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+}
+
 
 // ==========================================================
 // 전역 저장 데이터 (FBX 파싱 후 여기에 채움)
@@ -315,7 +323,7 @@ static void ExtractFromFBX(FbxScene* scene)
     g_BoneNameToNode.clear();
 
     // 1) DirectX 좌표계 + meter 단위
-    FbxAxisSystem::DirectX.ConvertScene(scene);
+    //FbxAxisSystem::DirectX.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
 
     // 2) Triangulate
@@ -558,7 +566,28 @@ static void ExtractFromFBX(FbxScene* scene)
         const char* uvSetName = (uvSetNames.GetCount() > 0) ? uvSetNames[0] : nullptr;
         bool hasUVSet = (uvSetName != nullptr);
 
-        // 정점 추출 (스킨용: 베이크/flip/노말 변환 없음, EXPORT_SCALE_F만 적용)
+        // === 변환행렬 준비 (base mesh 공간) ===
+        FbxAMatrix baseG; baseG.SetIdentity();
+        if (baseNode) baseG = baseNode->EvaluateGlobalTransform();
+        FbxAMatrix baseInv = baseG.Inverse();
+
+        FbxAMatrix meshG = node->EvaluateGlobalTransform();
+
+        FbxAMatrix geo; geo.SetIdentity();
+        geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
+        geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
+        geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
+
+        FbxAMatrix toBase = baseInv * meshG * geo;
+
+        double det = Det3x3(meshG * geo);
+        bool mirrored = (det < 0.0);
+
+#if DEBUGLOG
+        DLOG("[NodeDet] "); DLOG(node->GetName());
+        DLOG(" det="); DLOGLN(det);
+#endif
+
         std::vector<int> vtxCpIndex;
         vtxCpIndex.reserve(polyCount * 3);
 
@@ -569,64 +598,58 @@ static void ExtractFromFBX(FbxScene* scene)
                 int cpIdx = mesh->GetPolygonVertex(p, k);
                 if (cpIdx < 0 || cpIdx >= cpCount) continue;
 
-                Vertex v{}; // zero init
+                Vertex v{};
 
                 // position
-                FbxVector4 posL = cp[cpIdx];
-                v.position[0] = (float)posL[0] * EXPORT_SCALE_F;
-                v.position[1] = (float)posL[1] * EXPORT_SCALE_F;
-                v.position[2] = (float)posL[2] * EXPORT_SCALE_F;
+                FbxVector4 p4 = toBase.MultT(cp[cpIdx]);
+                v.position[0] = (float)p4[0] * EXPORT_SCALE_F;
+                v.position[1] = (float)p4[1] * EXPORT_SCALE_F;
+                v.position[2] = (float)p4[2] * EXPORT_SCALE_F;
 
-                // normal (스킨용: 그대로)
+                // normal (주의: 비균일 스케일 있으면 inverse-transpose가 정석)
                 FbxVector4 nL;
                 mesh->GetPolygonVertexNormal(p, k, nL);
-                nL.Normalize();
-                v.normal[0] = (float)nL[0];
-                v.normal[1] = (float)nL[1];
-                v.normal[2] = (float)nL[2];
+                FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
+                FbxVector4 nW = toBase.MultT(n4);
+                nW.Normalize();
+                v.normal[0] = (float)nW[0];
+                v.normal[1] = (float)nW[1];
+                v.normal[2] = (float)nW[2];
 
                 // UV
                 if (hasUVSet)
                 {
-                    FbxVector2 uv;
-                    bool unmapped = false;
+                    FbxVector2 uv; bool unmapped = false;
                     if (mesh->GetPolygonVertexUV(p, k, uvSetName, uv, unmapped))
                     {
                         v.uv[0] = (float)uv[0];
                         v.uv[1] = 1.0f - (float)uv[1];
                     }
-                    else
-                    {
-                        v.uv[0] = v.uv[1] = 0.0f;
-                    }
-                }
-                else
-                {
-                    v.uv[0] = v.uv[1] = 0.0f;
                 }
 
                 sm.vertices.push_back(v);
-                sm.indices.push_back((uint32_t)sm.indices.size());
                 vtxCpIndex.push_back(cpIdx);
+
+                if ((sm.vertices.size() % 3) == 0)
+                {
+                    uint32_t base = (uint32_t)sm.vertices.size() - 3;
+                    if (!mirrored)
+                    {
+                        sm.indices.push_back(base + 0);
+                        sm.indices.push_back(base + 1);
+                        sm.indices.push_back(base + 2);
+                    }
+                    else
+                    {
+                        sm.indices.push_back(base + 0);
+                        sm.indices.push_back(base + 2);
+                        sm.indices.push_back(base + 1);
+                    }
+                }
             }
         }
 
-        // 스킨 웨이트 채우기
         FillSkinWeights(mesh, sm, vtxCpIndex);
-
-#if DEBUGLOG
-        DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
-        DLOG("materialIndex="); DLOG(sm.materialIndex);
-
-        if (sm.materialIndex < g_Materials.size())
-        {
-            const auto& mat = g_Materials[sm.materialIndex];
-            DLOG(" ("); DLOG(mat.name); DLOG(")");
-            DLOG(" diffuse=\""); DLOG(mat.diffuseTextureName); DLOG("\"");
-        }
-        DLOGLN("");
-#endif
-
         g_SubMeshes.push_back(std::move(sm));
     }
 }
