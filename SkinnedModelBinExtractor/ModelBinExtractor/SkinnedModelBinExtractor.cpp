@@ -302,6 +302,176 @@ static void FillSkinWeights(FbxMesh* mesh, SubMesh& sm, const std::vector<int>& 
         }
     }
 }
+// ==========================================================
+// DEBUG DUMP (one-shot)
+// ==========================================================
+static double Det3x3(const FbxAMatrix& m)
+{
+    double a = m.Get(0, 0), b = m.Get(0, 1), c = m.Get(0, 2);
+    double d = m.Get(1, 0), e = m.Get(1, 1), f = m.Get(1, 2);
+    double g = m.Get(2, 0), h = m.Get(2, 1), i = m.Get(2, 2);
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+}
+
+static void DumpTRS(const char* tag, const FbxAMatrix& m)
+{
+    FbxVector4    T = m.GetT();
+    FbxQuaternion Q = m.GetQ();
+    FbxVector4    S = m.GetS();
+    Q.Normalize();
+
+    DLOG(tag);
+    DLOG(" det="); DLOG(Det3x3(m));
+    DLOG(" T=("); DLOG(T[0]); DLOG(","); DLOG(T[1]); DLOG(","); DLOG(T[2]); DLOG(")");
+    DLOG(" Q=("); DLOG(Q[0]); DLOG(","); DLOG(Q[1]); DLOG(","); DLOG(Q[2]); DLOG(","); DLOG(Q[3]); DLOG(")");
+    DLOG(" S=("); DLOG(S[0]); DLOG(","); DLOG(S[1]); DLOG(","); DLOG(S[2]); DLOGLN(")");
+}
+
+static void DumpNodeChain(FbxNode* node)
+{
+    if (!node) { DLOGLN("[Chain] null"); return; }
+    DLOG("[Chain] ");
+    for (FbxNode* n = node; n; n = n->GetParent())
+    {
+        DLOG(n->GetName());
+        FbxNodeAttribute* a = n->GetNodeAttribute();
+        if (a && a->GetAttributeType() == FbxNodeAttribute::eSkeleton) DLOG("(Skel)");
+        else if (a && a->GetAttributeType() == FbxNodeAttribute::eMesh) DLOG("(Mesh)");
+        else DLOG("(none)");
+
+        if (n->GetParent()) DLOG(" <- ");
+    }
+    DLOGLN("");
+}
+
+static const char* SafeName(FbxNode* n)
+{
+    return (n && n->GetName() && n->GetName()[0] != '\0') ? n->GetName() : "null";
+}
+
+static int Bool01(bool v) { return v ? 1 : 0; }
+
+
+static void DumpModelDebug_All(
+    FbxScene* scene,
+    const vector<Bone>& bones,
+    const vector<bool>& boneHasBind,
+    const vector<FbxAMatrix>& boneGlobalBind,
+    FbxNode* baseNode,
+    const vector<pair<FbxNode*, FbxMesh*>>& meshRefsSimple,
+    int baseMeshIndex,
+    const FbxAMatrix& S,              // mirror matrix
+    bool mirrorXExport
+)
+{
+    // 출력 포맷(가독성)
+    std::cout.setf(std::ios::fixed);
+    std::cout.precision(6);
+
+    DLOGLN("========== [DEBUG DUMP BEGIN] ==========");
+
+    // 0) Scene/Root
+    if (scene)
+    {
+        FbxNode* root = scene->GetRootNode();
+        DLOG("[Scene] root="); DLOGLN(SafeName(root));
+    }
+
+    // 1) Base node
+    DLOG("[Base] index="); DLOG(baseMeshIndex);
+    DLOG(" node="); DLOGLN(SafeName(baseNode));
+
+    if (baseNode)
+    {
+        DumpNodeChain(baseNode);
+        FbxAMatrix baseG = baseNode->EvaluateGlobalTransform();
+        DumpTRS("[BaseG] ", baseG);
+        DumpTRS("[BaseInv] ", baseG.Inverse());
+    }
+
+    // 2) Mirror matrix 자체
+    DLOG("[Mirror] enabled="); DLOG(mirrorXExport ? 1 : 0); DLOGLN("");
+    if (mirrorXExport)
+        DumpTRS("[MirrorS] ", S);
+
+    // 3) Mesh nodes overview (각 메시 det, toBase det 등)
+    DLOGLN("[Meshes]");
+    for (int i = 0; i < (int)meshRefsSimple.size(); ++i)
+    {
+        FbxNode* node = meshRefsSimple[i].first;
+        FbxMesh* mesh = meshRefsSimple[i].second;
+        if (!node || !mesh) continue;
+
+        FbxAMatrix meshG = node->EvaluateGlobalTransform();
+
+        FbxAMatrix geo; geo.SetIdentity();
+        geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
+        geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
+        geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
+
+        double detMeshGeo = Det3x3(meshG * geo);
+
+        DLOG("  ["); DLOG(i); DLOG("] ");
+        DLOG(node->GetName());
+        DLOG(" cp="); DLOG(mesh->GetControlPointsCount());
+        DLOG(" det(meshG*geo)="); DLOGLN(detMeshGeo);
+
+        if (i == baseMeshIndex) DLOGLN("      (BASE MESH)");
+
+        DumpNodeChain(node);
+        DumpTRS("    meshG ", meshG);
+        DumpTRS("    geo   ", geo);
+
+        if (baseNode)
+        {
+            FbxAMatrix baseG = baseNode->EvaluateGlobalTransform();
+            FbxAMatrix toBase = baseG.Inverse() * meshG * geo;
+            DumpTRS("    toBase", toBase);
+        }
+    }
+
+    // 4) Bones overview (여기가 “애니메이션과 비교” 핵심)
+    DLOGLN("[Bones]");
+    DLOG("  count="); DLOGLN((int)bones.size());
+
+    int missing = 0;
+    for (int i = 0; i < (int)bones.size(); ++i)
+        if (!boneHasBind[i]) missing++;
+    DLOG("  bindMissing="); DLOG(missing); DLOG(" / "); DLOGLN((int)bones.size());
+
+    for (int i = 0; i < (int)bones.size(); ++i)
+    {
+        const Bone& b = bones[i];
+        DLOG("  ["); DLOG(i); DLOG("] ");
+        DLOG(b.name); DLOG(" parent="); DLOG(b.parentIndex);
+        bool hb = (bool)boneHasBind[i];
+        DLOG(" hasBind="); DLOGLN(Bool01(hb));
+
+
+        if (boneHasBind[i])
+        {
+            const FbxAMatrix& g = boneGlobalBind[i];
+            DumpTRS("    GBind ", g);
+
+            // local bind은 저장된 float[16] 기반으로 “대략” 확인(정확비교는 float 출력용)
+            // (여기서는 matrix det 정도만 보고 싶으면 float->matrix로 복원 가능)
+        }
+
+        // bindLocal / offsetMatrix는 이미 float로 저장됨 -> 그대로 덤프(정확 비교용)
+        DLOGLN("    bindLocal[16]=");
+        DLOG("      ");
+        for (int k = 0; k < 16; ++k) { DLOG(b.bindLocal[k]); DLOG((k % 4 == 3) ? "\n      " : ", "); }
+        DLOGLN("");
+
+        DLOGLN("    offsetMatrix[16]=");
+        DLOG("      ");
+        for (int k = 0; k < 16; ++k) { DLOG(b.offsetMatrix[k]); DLOG((k % 4 == 3) ? "\n      " : ", "); }
+        DLOGLN("");
+    }
+
+    DLOGLN("========== [DEBUG DUMP END] ==========");
+}
+
 
 // ==========================================================
 // 스킨 전용 FBX 파싱
@@ -475,6 +645,28 @@ static void ExtractFromFBX(FbxScene* scene)
             for (int c = 0; c < 4; ++c)
                 g_Bones[i].offsetMatrix[r * 4 + c] = (float)off.Get(r, c);
     }
+
+#if DEBUGLOG
+    {
+        // Dump 함수 인자가 pair<FbxNode*,FbxMesh*> 벡터라서 meshRefs를 간단히 복사/변환
+        vector<pair<FbxNode*, FbxMesh*>> meshRefsSimple;
+        meshRefsSimple.reserve(meshRefs.size());
+        for (auto& mr : meshRefs) meshRefsSimple.push_back({ mr.node, mr.mesh });
+
+        DumpModelDebug_All(
+            scene,
+            g_Bones,
+            boneHasBind,
+            boneGlobalBind,
+            baseNode,
+            meshRefsSimple,
+            baseMeshIndex,
+            S,
+            MIRROR_X_EXPORT
+        );
+    }
+#endif
+
 
     // 9) Material + Diffuse Texture 수집 (전체 노드에서 수집해도 무방)
     g_Materials.clear();

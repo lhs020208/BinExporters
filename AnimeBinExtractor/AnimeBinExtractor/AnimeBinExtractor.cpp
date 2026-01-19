@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <cfloat>   // FLT_MAX
 
 using namespace std;
@@ -51,6 +52,41 @@ static void WriteStringUtf8(ofstream& out, const std::string& s)
     uint16_t len = static_cast<uint16_t>(s.size());
     WriteUInt16(out, len);
     if (len > 0) WriteRaw(out, s.data(), len);
+}
+
+static const char* SafeName(FbxNode* n)
+{
+    return (n && n->GetName() && n->GetName()[0] != '\0') ? n->GetName() : "null";
+}
+
+static const char* SafeNameStack(FbxAnimStack* s)
+{
+    return (s && s->GetName() && s->GetName()[0] != '\0') ? s->GetName() : "null";
+}
+
+static void PrintVec3(const char* tag, const FbxVector4& v)
+{
+    cout << tag << "=("
+        << (double)v[0] << ","
+        << (double)v[1] << ","
+        << (double)v[2] << ")\n";
+}
+
+static void PrintQuat(const char* tag, const FbxQuaternion& q)
+{
+    cout << tag << "=("
+        << (double)q[0] << ","
+        << (double)q[1] << ","
+        << (double)q[2] << ","
+        << (double)q[3] << ")\n";
+}
+
+static double Det3x3(const FbxAMatrix& m)
+{
+    double a = m.Get(0, 0), b = m.Get(0, 1), c = m.Get(0, 2);
+    double d = m.Get(1, 0), e = m.Get(1, 1), f = m.Get(1, 2);
+    double g = m.Get(2, 0), h = m.Get(2, 1), i = m.Get(2, 2);
+    return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
 }
 
 
@@ -233,6 +269,144 @@ static void TraverseAndExtractTracks(
     TraverseChildren();
 }
 
+static void DumpAnimExtractorDebug(
+    const char* phaseTag,
+    FbxScene* scene,
+    FbxAnimStack* stack,
+    FbxAnimLayer* layer,
+    const FbxTimeSpan& span,
+    const vector<TrackBin>* tracks,                       // 없으면 nullptr
+    const unordered_map<string, int>* nameToTrack,         // 없으면 nullptr
+    const vector<string>& probeBones,                     // 관심 본들(예: Hips/Hands)
+    float timeScale)
+{
+    cout << "\n==================== [AnimDump] " << phaseTag << " ====================\n";
+
+    // ---- Scene / Stack / Span
+    cout << "[Scene] root=" << SafeName(scene ? scene->GetRootNode() : nullptr) << "\n";
+    cout << "[Stack] name=" << SafeNameStack(stack) << " layer=" << (layer ? "ok" : "null") << "\n";
+
+    const double s0 = span.GetStart().GetSecondDouble();
+    const double s1 = span.GetStop().GetSecondDouble();
+    cout << "[Span] start=" << s0 << " end=" << s1 << " dur=" << (s1 - s0) << " timeScale=" << timeScale << "\n";
+
+    // ---- Skeleton 노드 개수/이름 샘플
+    int skelCount = 0;
+    vector<string> skelNames;
+    function<void(FbxNode*)> dfs = [&](FbxNode* n)
+        {
+            if (!n) return;
+            if (IsSkeletonNode(n))
+            {
+                skelCount++;
+                if ((int)skelNames.size() < 20) skelNames.push_back(n->GetName());
+            }
+            for (int i = 0; i < n->GetChildCount(); ++i) dfs(n->GetChild(i));
+        };
+    dfs(scene ? scene->GetRootNode() : nullptr);
+
+    cout << "[Skeleton] count=" << skelCount << " sample(<=20)=";
+    for (size_t i = 0; i < skelNames.size(); ++i)
+    {
+        if (i) cout << ", ";
+        cout << skelNames[i];
+    }
+    cout << "\n";
+
+    // ---- 관심 본의 “로컬/글로벌”을 특정 시간에 찍기 (start/mid/end)
+    auto DumpNodeAt = [&](FbxNode* n, const char* label, const FbxTime& t)
+        {
+            if (!n) { cout << "  [" << label << "] node=null\n"; return; }
+
+            FbxAMatrix L = n->EvaluateLocalTransform(t);
+            if (MIRROR_X_EXPORT) { static FbxAMatrix Sx = MakeMirrorX(); L = Sx * L * Sx; }
+
+            FbxVector4 T = L.GetT();
+            FbxQuaternion R = L.GetQ(); R.Normalize();
+            FbxVector4 S = L.GetS();
+
+            cout << "  [" << label << "] " << n->GetName()
+                << " det3=" << Det3x3(L)
+                << " T=(" << (double)T[0] << "," << (double)T[1] << "," << (double)T[2] << ")"
+                << " S=(" << (double)S[0] << "," << (double)S[1] << "," << (double)S[2] << ")"
+                << " Q=(" << (double)R[0] << "," << (double)R[1] << "," << (double)R[2] << "," << (double)R[3] << ")"
+                << "\n";
+        };
+
+    if (scene && scene->GetRootNode())
+    {
+        FbxTime tStart = span.GetStart();
+        FbxTime tEnd = span.GetStop();
+        FbxTime tMid;  tMid.SetSecondDouble((s0 + s1) * 0.5);
+
+        cout << "[ProbeBones] (local after mirror-conjugation)\n";
+        for (const string& bn : probeBones)
+        {
+            // 이름으로 노드 찾기(간단 DFS)
+            FbxNode* found = nullptr;
+            function<void(FbxNode*)> findDfs = [&](FbxNode* n)
+                {
+                    if (!n || found) return;
+                    if (bn == n->GetName()) { found = n; return; }
+                    for (int i = 0; i < n->GetChildCount(); ++i) findDfs(n->GetChild(i));
+                };
+            findDfs(scene->GetRootNode());
+
+            DumpNodeAt(found, "Start", tStart);
+            DumpNodeAt(found, "Mid", tMid);
+            DumpNodeAt(found, "End", tEnd);
+        }
+    }
+
+    // ---- Track 결과(있으면) 요약 + 관심 본 key 샘플
+    if (tracks && nameToTrack)
+    {
+        cout << "[Tracks] count=" << tracks->size() << "\n";
+
+        // 길이 분포(최소/최대)와 상위 몇개 출력
+        size_t minK = (size_t)-1, maxK = 0;
+        string minN, maxN;
+        for (auto& tr : *tracks)
+        {
+            size_t k = tr.keys.size();
+            if (k < minK) { minK = k; minN = tr.boneName; }
+            if (k > maxK) { maxK = k; maxN = tr.boneName; }
+        }
+        cout << "  keysMin=" << minK << " (" << minN << "), keysMax=" << maxK << " (" << maxN << ")\n";
+
+        auto DumpTrackSample = [&](const string& bn)
+            {
+                auto it = nameToTrack->find(bn);
+                if (it == nameToTrack->end()) { cout << "  [TrackSample] " << bn << " : NOT FOUND\n"; return; }
+                const TrackBin& tr = (*tracks)[it->second];
+                cout << "  [TrackSample] " << bn << " keys=" << tr.keys.size() << "\n";
+
+                // 앞/중/뒤 1개씩 (있을 때)
+                auto printK = [&](const KeyframeBin& k, const char* tag)
+                    {
+                        cout << "    " << tag << " t=" << k.timeSec
+                            << " T=(" << k.tx << "," << k.ty << "," << k.tz << ")"
+                            << " S=(" << k.sx << "," << k.sy << "," << k.sz << ")"
+                            << " Q=(" << k.rx << "," << k.ry << "," << k.rz << "," << k.rw << ")"
+                            << "\n";
+                    };
+
+                if (!tr.keys.empty())
+                {
+                    printK(tr.keys.front(), "first");
+                    printK(tr.keys[tr.keys.size() / 2], "mid");
+                    printK(tr.keys.back(), "last");
+                }
+            };
+
+        cout << "[TrackProbe] (after export packing)\n";
+        for (const string& bn : probeBones) DumpTrackSample(bn);
+    }
+
+    cout << "==================== [AnimDump End] ====================\n";
+}
+
+
 // ======================================================================
 // main: 애니메이션 FBX → 애니메이션 BIN(ABIN) 추출기
 // ======================================================================
@@ -335,6 +509,16 @@ int main()
         vector<TrackBin> tracks;
         unordered_map<string, int> nameToTrack;
 
+        vector<string> probe = { "Bind_Hips", "Bind_Spine", "Bind_LeftHand", "Bind_RightHand" };
+
+        DumpAnimExtractorDebug(
+            "PRE-EXTRACT",
+            scene, stack, layer, timeSpan,
+            nullptr, nullptr,      // tracks/nameToTrack 아직 없음
+            probe,
+            timeScale);
+
+
         TraverseAndExtractTracks(
             scene->GetRootNode(),
             layer,
@@ -342,6 +526,13 @@ int main()
             timeScale,
             tracks,
             nameToTrack);
+
+        DumpAnimExtractorDebug(
+            "POST-EXTRACT",
+            scene, stack, layer, timeSpan,
+            &tracks, &nameToTrack,
+            probe,
+            timeScale);
 
         if (tracks.empty())
         {
