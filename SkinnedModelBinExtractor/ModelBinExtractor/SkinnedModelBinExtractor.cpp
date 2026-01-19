@@ -19,6 +19,7 @@ using namespace std;
 
 static constexpr double EXPORT_SCALE_D = 0.01;
 static constexpr float  EXPORT_SCALE_F = 0.01f;
+static constexpr bool MIRROR_X_EXPORT = true;
 
 #define DEBUGLOG 1
 
@@ -315,7 +316,7 @@ static void ExtractFromFBX(FbxScene* scene)
     g_BoneNameToNode.clear();
 
     // 1) DirectX 좌표계 + meter 단위
-    //FbxAxisSystem::DirectX.ConvertScene(scene);
+    FbxAxisSystem::DirectX.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
 
     // 2) Triangulate
@@ -406,6 +407,12 @@ static void ExtractFromFBX(FbxScene* scene)
     else          baseMeshGlobal.SetIdentity();
 
     FbxAMatrix baseMeshGlobalInv = baseMeshGlobal.Inverse();
+    // X reflection matrix S (좌우반전)
+    FbxAMatrix S; S.SetIdentity();
+    S.SetRow(0, FbxVector4(-1, 0, 0, 0));
+    S.SetRow(1, FbxVector4(0, 1, 0, 0));
+    S.SetRow(2, FbxVector4(0, 0, 1, 0));
+    S.SetRow(3, FbxVector4(0, 0, 0, 1));
 
     for (int i = 0; i < boneCount; ++i)
     {
@@ -428,6 +435,9 @@ static void ExtractFromFBX(FbxScene* scene)
         t[1] *= EXPORT_SCALE_D;
         t[2] *= EXPORT_SCALE_D;
         boneInMesh.SetT(t);
+
+        if (MIRROR_X_EXPORT)
+            boneInMesh = S * boneInMesh * S;
 
         boneGlobalBind[i] = boneInMesh;
         boneHasBind[i] = true;
@@ -583,7 +593,7 @@ static void ExtractFromFBX(FbxScene* scene)
                 double g = m.Get(2, 0), h = m.Get(2, 1), i = m.Get(2, 2);
                 return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
             };
-        bool flipWinding = (Det3x3(meshG * geo) < 0.0);
+        bool flipWinding = (Det3x3(meshG * geo) < 0.0) ^ MIRROR_X_EXPORT;
 
         // 정점/인덱스
         std::vector<int> vtxCpIndex;
@@ -602,6 +612,7 @@ static void ExtractFromFBX(FbxScene* scene)
 
                 // position (base 공간으로 변환)
                 FbxVector4 p4 = toBase.MultT(cp[cpIdx]);
+                if (MIRROR_X_EXPORT) p4[0] = -p4[0];
                 triV[k].position[0] = (float)p4[0] * EXPORT_SCALE_F;
                 triV[k].position[1] = (float)p4[1] * EXPORT_SCALE_F;
                 triV[k].position[2] = (float)p4[2] * EXPORT_SCALE_F;
@@ -611,6 +622,8 @@ static void ExtractFromFBX(FbxScene* scene)
                 mesh->GetPolygonVertexNormal(p, k, nL);
                 FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
                 FbxVector4 nW = toBase.MultT(n4);
+                if (MIRROR_X_EXPORT) nW[0] = -nW[0];
+
                 nW.Normalize();
                 triV[k].normal[0] = (float)nW[0];
                 triV[k].normal[1] = (float)nW[1];
