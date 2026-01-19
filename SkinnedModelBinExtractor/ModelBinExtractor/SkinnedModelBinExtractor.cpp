@@ -422,6 +422,12 @@ static void ExtractFromFBX(FbxScene* scene)
     DLOG(" det="); DLOGLN(baseDet);
 #endif
     FbxAMatrix baseMeshGlobalInv = baseMeshGlobal.Inverse();
+    FbxAMatrix S;
+    S.SetIdentity();
+    S.SetRow(0, FbxVector4(-1, 0, 0, 0));
+    S.SetRow(1, FbxVector4(0, 1, 0, 0));
+    S.SetRow(2, FbxVector4(0, 0, 1, 0));
+    S.SetRow(3, FbxVector4(0, 0, 0, 1));
 
     for (int i = 0; i < boneCount; ++i)
     {
@@ -444,6 +450,8 @@ static void ExtractFromFBX(FbxScene* scene)
         t[1] *= EXPORT_SCALE_D;
         t[2] *= EXPORT_SCALE_D;
         boneInMesh.SetT(t);
+        if (FLIP_X_TO_MATCH_UNITY)
+            boneInMesh = S * boneInMesh * S;
 
         boneGlobalBind[i] = boneInMesh;
         boneHasBind[i] = true;
