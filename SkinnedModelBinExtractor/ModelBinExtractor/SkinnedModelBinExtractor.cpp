@@ -19,6 +19,7 @@ using namespace std;
 
 static constexpr double EXPORT_SCALE_D = 0.01;
 static constexpr float  EXPORT_SCALE_F = 0.01f;
+static constexpr bool FLIP_X_TO_MATCH_UNITY = true;
 
 #define DEBUGLOG 1
 
@@ -413,6 +414,13 @@ static void ExtractFromFBX(FbxScene* scene)
     if (baseNode) baseMeshGlobal = baseNode->EvaluateGlobalTransform();
     else          baseMeshGlobal.SetIdentity();
 
+    double baseDet = Det3x3(baseMeshGlobal);
+    bool globalMirrorX = (baseDet < 0.0);
+
+#if DEBUGLOG
+    DLOG("[BaseDet] "); DLOG(baseNode ? baseNode->GetName() : "null");
+    DLOG(" det="); DLOGLN(baseDet);
+#endif
     FbxAMatrix baseMeshGlobalInv = baseMeshGlobal.Inverse();
 
     for (int i = 0; i < boneCount; ++i)
@@ -582,6 +590,7 @@ static void ExtractFromFBX(FbxScene* scene)
 
         double det = Det3x3(meshG * geo);
         bool mirrored = (det < 0.0);
+        bool finalFlip = (mirrored ^ FLIP_X_TO_MATCH_UNITY);
 
 #if DEBUGLOG
         DLOG("[NodeDet] "); DLOG(node->GetName());
@@ -602,6 +611,9 @@ static void ExtractFromFBX(FbxScene* scene)
 
                 // position
                 FbxVector4 p4 = toBase.MultT(cp[cpIdx]);
+
+                if (FLIP_X_TO_MATCH_UNITY) p4[0] = -p4[0];
+
                 v.position[0] = (float)p4[0] * EXPORT_SCALE_F;
                 v.position[1] = (float)p4[1] * EXPORT_SCALE_F;
                 v.position[2] = (float)p4[2] * EXPORT_SCALE_F;
@@ -611,6 +623,9 @@ static void ExtractFromFBX(FbxScene* scene)
                 mesh->GetPolygonVertexNormal(p, k, nL);
                 FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
                 FbxVector4 nW = toBase.MultT(n4);
+
+                if (FLIP_X_TO_MATCH_UNITY) nW[0] = -nW[0];
+
                 nW.Normalize();
                 v.normal[0] = (float)nW[0];
                 v.normal[1] = (float)nW[1];
@@ -633,7 +648,7 @@ static void ExtractFromFBX(FbxScene* scene)
                 if ((sm.vertices.size() % 3) == 0)
                 {
                     uint32_t base = (uint32_t)sm.vertices.size() - 3;
-                    if (!mirrored)
+                    if (!finalFlip)
                     {
                         sm.indices.push_back(base + 0);
                         sm.indices.push_back(base + 1);
