@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <system_error>
+#include <cmath>
 
 #include <fbxsdk.h>
 
@@ -47,6 +48,7 @@ struct Vertex {
     float position[3];
     float normal[3];
     float uv[2];
+    float tangent[4];
     uint32_t boneIndices[4];
     float boneWeights[4];
 };
@@ -54,6 +56,7 @@ struct Vertex {
 struct Material {
     string name;               // material 이름 (ex: "face")
     string diffuseTextureName; // texture 파일명 base (ex: "face")
+    string normalTextureName;
 };
 
 struct SubMesh {
@@ -138,6 +141,7 @@ static void WriteMaterialSection()
     {
         WriteStringUtf8(m.name);
         WriteStringUtf8(m.diffuseTextureName);
+        WriteStringUtf8(m.normalTextureName);
     }
 }
 
@@ -149,7 +153,7 @@ static void WriteModelHeader()
     char magic[4] = { 'M', 'B', 'I', 'N' };
     WriteRaw(magic, 4);
 
-    uint32_t version = 1;
+    uint32_t version = 2;
     uint32_t flags = 0;
     uint32_t boneCount = (uint32_t)g_Bones.size();
     uint32_t materialCount = (uint32_t)g_Materials.size();
@@ -196,6 +200,7 @@ static void WriteSubMeshSection()
             WriteFloatArray(v.position, 3);
             WriteFloatArray(v.normal, 3);
             WriteFloatArray(v.uv, 2);
+            WriteFloatArray(v.tangent, 4);
             WriteRaw(v.boneIndices, sizeof(uint32_t) * 4);
             WriteFloatArray(v.boneWeights, 4);
         }
@@ -221,6 +226,105 @@ static bool SaveModelBin(const std::string& filename)
     g_out.close();
     return true;
 }
+static std::string ExtractFirstTextureStem(FbxProperty prop)
+{
+    if (!prop.IsValid()) return "";
+
+    // LayeredTexture (있으면 0번만)
+    if (prop.GetSrcObjectCount<FbxLayeredTexture>() > 0)
+    {
+        auto* layered = prop.GetSrcObject<FbxLayeredTexture>(0);
+        if (layered && layered->GetSrcObjectCount<FbxTexture>() > 0)
+        {
+            auto* tex = FbxCast<FbxFileTexture>(layered->GetSrcObject<FbxTexture>(0));
+            if (tex) return SafeStemFromFbxFileName(tex->GetFileName());
+        }
+        return "";
+    }
+
+    // 일반 텍스처
+    if (prop.GetSrcObjectCount<FbxTexture>() > 0)
+    {
+        auto* tex = FbxCast<FbxFileTexture>(prop.GetSrcObject<FbxTexture>(0));
+        if (tex) return SafeStemFromFbxFileName(tex->GetFileName());
+    }
+    return "";
+}
+
+static void ComputeTangentForTri(Vertex& a, Vertex& b, Vertex& c)
+{
+    // p, uv
+    float x1 = b.position[0] - a.position[0];
+    float y1 = b.position[1] - a.position[1];
+    float z1 = b.position[2] - a.position[2];
+
+    float x2 = c.position[0] - a.position[0];
+    float y2 = c.position[1] - a.position[1];
+    float z2 = c.position[2] - a.position[2];
+
+    float s1 = b.uv[0] - a.uv[0];
+    float t1 = b.uv[1] - a.uv[1];
+    float s2 = c.uv[0] - a.uv[0];
+    float t2 = c.uv[1] - a.uv[1];
+
+    float denom = (s1 * t2 - t1 * s2);
+    if (fabsf(denom) < 1e-8f)
+    {
+        // 퇴화 UV: 기본값
+        a.tangent[0] = b.tangent[0] = c.tangent[0] = 1.0f;
+        a.tangent[1] = b.tangent[1] = c.tangent[1] = 0.0f;
+        a.tangent[2] = b.tangent[2] = c.tangent[2] = 0.0f;
+        a.tangent[3] = b.tangent[3] = c.tangent[3] = 1.0f;
+        return;
+    }
+
+    float r = 1.0f / denom;
+
+    // tangent, bitangent (unnormalized)
+    float tx = (x1 * t2 - x2 * t1) * r;
+    float ty = (y1 * t2 - y2 * t1) * r;
+    float tz = (z1 * t2 - z2 * t1) * r;
+
+    float bx = (x2 * s1 - x1 * s2) * r;
+    float by = (y2 * s1 - y1 * s2) * r;
+    float bz = (z2 * s1 - z1 * s2) * r;
+
+    auto Normalize3 = [](float& x, float& y, float& z)
+        {
+            float len = sqrtf(x * x + y * y + z * z);
+            if (len > 1e-8f) { float inv = 1.0f / len; x *= inv; y *= inv; z *= inv; }
+        };
+
+    auto Dot3 = [](float ax, float ay, float az, float bx, float by, float bz)->float
+        { return ax * bx + ay * by + az * bz; };
+
+    auto Cross3 = [](float ax, float ay, float az, float bx, float by, float bz,
+        float& rx, float& ry, float& rz)
+        { rx = ay * bz - az * by; ry = az * bx - ax * bz; rz = ax * by - ay * bx; };
+
+    auto FixOne = [&](Vertex& v)
+        {
+            float nx = v.normal[0], ny = v.normal[1], nz = v.normal[2];
+            Normalize3(nx, ny, nz);
+
+            // Gram-Schmidt: T = normalize(T - N*dot(N,T))
+            float dotNT = Dot3(nx, ny, nz, tx, ty, tz);
+            float tpx = tx - nx * dotNT;
+            float tpy = ty - ny * dotNT;
+            float tpz = tz - nz * dotNT;
+            Normalize3(tpx, tpy, tpz);
+
+            // handedness: sign = dot(cross(N,T), B) < 0 ? -1 : +1
+            float cx, cy, cz;
+            Cross3(nx, ny, nz, tpx, tpy, tpz, cx, cy, cz);
+            float sign = (Dot3(cx, cy, cz, bx, by, bz) < 0.0f) ? -1.0f : 1.0f;
+
+            v.tangent[0] = tpx; v.tangent[1] = tpy; v.tangent[2] = tpz; v.tangent[3] = sign;
+        };
+
+    FixOne(a); FixOne(b); FixOne(c);
+}
+
 
 // ==========================================================
 // 스킨 가중치 채우기
@@ -350,127 +454,6 @@ static const char* SafeName(FbxNode* n)
 }
 
 static int Bool01(bool v) { return v ? 1 : 0; }
-
-
-static void DumpModelDebug_All(
-    FbxScene* scene,
-    const vector<Bone>& bones,
-    const vector<bool>& boneHasBind,
-    const vector<FbxAMatrix>& boneGlobalBind,
-    FbxNode* baseNode,
-    const vector<pair<FbxNode*, FbxMesh*>>& meshRefsSimple,
-    int baseMeshIndex,
-    const FbxAMatrix& S,              // mirror matrix
-    bool mirrorXExport
-)
-{
-    // 출력 포맷(가독성)
-    std::cout.setf(std::ios::fixed);
-    std::cout.precision(6);
-
-    DLOGLN("========== [DEBUG DUMP BEGIN] ==========");
-
-    // 0) Scene/Root
-    if (scene)
-    {
-        FbxNode* root = scene->GetRootNode();
-        DLOG("[Scene] root="); DLOGLN(SafeName(root));
-    }
-
-    // 1) Base node
-    DLOG("[Base] index="); DLOG(baseMeshIndex);
-    DLOG(" node="); DLOGLN(SafeName(baseNode));
-
-    if (baseNode)
-    {
-        DumpNodeChain(baseNode);
-        FbxAMatrix baseG = baseNode->EvaluateGlobalTransform();
-        DumpTRS("[BaseG] ", baseG);
-        DumpTRS("[BaseInv] ", baseG.Inverse());
-    }
-
-    // 2) Mirror matrix 자체
-    DLOG("[Mirror] enabled="); DLOG(mirrorXExport ? 1 : 0); DLOGLN("");
-    if (mirrorXExport)
-        DumpTRS("[MirrorS] ", S);
-
-    // 3) Mesh nodes overview (각 메시 det, toBase det 등)
-    DLOGLN("[Meshes]");
-    for (int i = 0; i < (int)meshRefsSimple.size(); ++i)
-    {
-        FbxNode* node = meshRefsSimple[i].first;
-        FbxMesh* mesh = meshRefsSimple[i].second;
-        if (!node || !mesh) continue;
-
-        FbxAMatrix meshG = node->EvaluateGlobalTransform();
-
-        FbxAMatrix geo; geo.SetIdentity();
-        geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
-        geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
-        geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
-
-        double detMeshGeo = Det3x3(meshG * geo);
-
-        DLOG("  ["); DLOG(i); DLOG("] ");
-        DLOG(node->GetName());
-        DLOG(" cp="); DLOG(mesh->GetControlPointsCount());
-        DLOG(" det(meshG*geo)="); DLOGLN(detMeshGeo);
-
-        if (i == baseMeshIndex) DLOGLN("      (BASE MESH)");
-
-        DumpNodeChain(node);
-        DumpTRS("    meshG ", meshG);
-        DumpTRS("    geo   ", geo);
-
-        if (baseNode)
-        {
-            FbxAMatrix baseG = baseNode->EvaluateGlobalTransform();
-            FbxAMatrix toBase = baseG.Inverse() * meshG * geo;
-            DumpTRS("    toBase", toBase);
-        }
-    }
-
-    // 4) Bones overview (여기가 “애니메이션과 비교” 핵심)
-    DLOGLN("[Bones]");
-    DLOG("  count="); DLOGLN((int)bones.size());
-
-    int missing = 0;
-    for (int i = 0; i < (int)bones.size(); ++i)
-        if (!boneHasBind[i]) missing++;
-    DLOG("  bindMissing="); DLOG(missing); DLOG(" / "); DLOGLN((int)bones.size());
-
-    for (int i = 0; i < (int)bones.size(); ++i)
-    {
-        const Bone& b = bones[i];
-        DLOG("  ["); DLOG(i); DLOG("] ");
-        DLOG(b.name); DLOG(" parent="); DLOG(b.parentIndex);
-        bool hb = (bool)boneHasBind[i];
-        DLOG(" hasBind="); DLOGLN(Bool01(hb));
-
-
-        if (boneHasBind[i])
-        {
-            const FbxAMatrix& g = boneGlobalBind[i];
-            DumpTRS("    GBind ", g);
-
-            // local bind은 저장된 float[16] 기반으로 “대략” 확인(정확비교는 float 출력용)
-            // (여기서는 matrix det 정도만 보고 싶으면 float->matrix로 복원 가능)
-        }
-
-        // bindLocal / offsetMatrix는 이미 float로 저장됨 -> 그대로 덤프(정확 비교용)
-        DLOGLN("    bindLocal[16]=");
-        DLOG("      ");
-        for (int k = 0; k < 16; ++k) { DLOG(b.bindLocal[k]); DLOG((k % 4 == 3) ? "\n      " : ", "); }
-        DLOGLN("");
-
-        DLOGLN("    offsetMatrix[16]=");
-        DLOG("      ");
-        for (int k = 0; k < 16; ++k) { DLOG(b.offsetMatrix[k]); DLOG((k % 4 == 3) ? "\n      " : ", "); }
-        DLOGLN("");
-    }
-
-    DLOGLN("========== [DEBUG DUMP END] ==========");
-}
 
 
 // ==========================================================
@@ -646,28 +629,6 @@ static void ExtractFromFBX(FbxScene* scene)
                 g_Bones[i].offsetMatrix[r * 4 + c] = (float)off.Get(r, c);
     }
 
-#if DEBUGLOG
-    {
-        // Dump 함수 인자가 pair<FbxNode*,FbxMesh*> 벡터라서 meshRefs를 간단히 복사/변환
-        vector<pair<FbxNode*, FbxMesh*>> meshRefsSimple;
-        meshRefsSimple.reserve(meshRefs.size());
-        for (auto& mr : meshRefs) meshRefsSimple.push_back({ mr.node, mr.mesh });
-
-        DumpModelDebug_All(
-            scene,
-            g_Bones,
-            boneHasBind,
-            boneGlobalBind,
-            baseNode,
-            meshRefsSimple,
-            baseMeshIndex,
-            S,
-            MIRROR_X_EXPORT
-        );
-    }
-#endif
-
-
     // 9) Material + Diffuse Texture 수집 (전체 노드에서 수집해도 무방)
     g_Materials.clear();
     g_MaterialNameToIndex.clear();
@@ -688,22 +649,12 @@ static void ExtractFromFBX(FbxScene* scene)
 
                 Material m{};
                 m.name = matName;
-                m.diffuseTextureName = "";
+                m.diffuseTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sDiffuse));
 
-                FbxProperty prop = mat->FindProperty(FbxSurfaceMaterial::sDiffuse);
-                if (prop.IsValid())
-                {
-                    int texCount = prop.GetSrcObjectCount<FbxTexture>();
-                    if (texCount > 0)
-                    {
-                        FbxFileTexture* tex = FbxCast<FbxFileTexture>(prop.GetSrcObject<FbxTexture>(0));
-                        if (tex)
-                        {
-                            const char* fn = tex->GetFileName();
-                            m.diffuseTextureName = SafeStemFromFbxFileName(fn);
-                        }
-                    }
-                }
+                // [추가] normal map은 NormalMap 슬롯 or Bump 슬롯에 들어오는 경우가 많아서 둘 다 시도
+                m.normalTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sNormalMap));
+                if (m.normalTextureName.empty())
+                    m.normalTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sBump));
 
                 uint32_t idx = (uint32_t)g_Materials.size();
                 g_Materials.push_back(m);
@@ -721,7 +672,8 @@ static void ExtractFromFBX(FbxScene* scene)
         const auto& m = g_Materials[i];
         DLOG("  ["); DLOG(i); DLOG("] ");
         DLOG("name=\""); DLOG(m.name); DLOG("\" ");
-        DLOG("diffuse=\""); DLOG(m.diffuseTextureName); DLOGLN("\"");
+        DLOG(" diffuse=\""); DLOG(m.diffuseTextureName); DLOG("\"");
+        DLOG(" normal=\"");  DLOG(m.normalTextureName);  DLOGLN("\"");
     }
 #endif
 
@@ -840,6 +792,11 @@ static void ExtractFromFBX(FbxScene* scene)
                     triV[k].uv[0] = triV[k].uv[1] = 0.0f;
                 }
             }
+
+            if (!flipWinding)
+                ComputeTangentForTri(triV[0], triV[1], triV[2]);
+            else
+                ComputeTangentForTri(triV[0], triV[2], triV[1]); // 인덱스 swap과 동일한 삼각형 순서
 
             // push vertices
             uint32_t base = (uint32_t)sm.vertices.size();
