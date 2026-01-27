@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <system_error>
+#include <cmath>
 
 #include <fbxsdk.h>
 using namespace std;
@@ -45,6 +46,7 @@ struct Vertex {
     float position[3];
     float normal[3];
     float uv[2];
+    float tangent[4];
     uint32_t boneIndices[4];
     float boneWeights[4];
 };
@@ -53,6 +55,7 @@ struct Material
 {
     string name;
     string diffuseTextureName;
+    string normalTextureName;
 };
 
 struct SubMesh {
@@ -120,6 +123,32 @@ static std::string SafeStemFromFbxFileName(const char* fn)
     }
 }
 
+static std::string ExtractFirstTextureStem(FbxProperty prop)
+{
+    if (!prop.IsValid()) return "";
+
+    // LayeredTexture (있으면 0번만)
+    if (prop.GetSrcObjectCount<FbxLayeredTexture>() > 0)
+    {
+        auto* layered = prop.GetSrcObject<FbxLayeredTexture>(0);
+        if (layered && layered->GetSrcObjectCount<FbxTexture>() > 0)
+        {
+            auto* tex = FbxCast<FbxFileTexture>(layered->GetSrcObject<FbxTexture>(0));
+            if (tex) return SafeStemFromFbxFileName(tex->GetFileName());
+        }
+        return "";
+    }
+
+    // 일반 텍스처
+    if (prop.GetSrcObjectCount<FbxTexture>() > 0)
+    {
+        auto* tex = FbxCast<FbxFileTexture>(prop.GetSrcObject<FbxTexture>(0));
+        if (tex) return SafeStemFromFbxFileName(tex->GetFileName());
+    }
+    return "";
+}
+
+
 // ==========================================================
 // FBX Node Geometric Transform (별도 오프셋)
 // ==========================================================
@@ -136,6 +165,73 @@ static FbxAMatrix GetGeometry(FbxNode* node)
     return geo;
 }
 
+static void ComputeTangentForTri(Vertex& a, Vertex& b, Vertex& c)
+{
+    float x1 = b.position[0] - a.position[0];
+    float y1 = b.position[1] - a.position[1];
+    float z1 = b.position[2] - a.position[2];
+
+    float x2 = c.position[0] - a.position[0];
+    float y2 = c.position[1] - a.position[1];
+    float z2 = c.position[2] - a.position[2];
+
+    float s1 = b.uv[0] - a.uv[0];
+    float t1 = b.uv[1] - a.uv[1];
+    float s2 = c.uv[0] - a.uv[0];
+    float t2 = c.uv[1] - a.uv[1];
+
+    float denom = (s1 * t2 - t1 * s2);
+    if (fabsf(denom) < 1e-8f)
+    {
+        a.tangent[0] = b.tangent[0] = c.tangent[0] = 1.f;
+        a.tangent[1] = b.tangent[1] = c.tangent[1] = 0.f;
+        a.tangent[2] = b.tangent[2] = c.tangent[2] = 0.f;
+        a.tangent[3] = b.tangent[3] = c.tangent[3] = 1.f;
+        return;
+    }
+
+    float r = 1.0f / denom;
+
+    float tx = (x1 * t2 - x2 * t1) * r;
+    float ty = (y1 * t2 - y2 * t1) * r;
+    float tz = (z1 * t2 - z2 * t1) * r;
+
+    float bx = (x2 * s1 - x1 * s2) * r;
+    float by = (y2 * s1 - y1 * s2) * r;
+    float bz = (z2 * s1 - z1 * s2) * r;
+
+    auto Normalize3 = [](float& x, float& y, float& z)
+        {
+            float len = sqrtf(x * x + y * y + z * z);
+            if (len > 1e-8f) { float inv = 1.0f / len; x *= inv; y *= inv; z *= inv; }
+        };
+    auto Dot3 = [](float ax, float ay, float az, float bx, float by, float bz)->float
+        { return ax * bx + ay * by + az * bz; };
+    auto Cross3 = [](float ax, float ay, float az, float bx, float by, float bz, float& rx, float& ry, float& rz)
+        { rx = ay * bz - az * by; ry = az * bx - ax * bz; rz = ax * by - ay * bx; };
+
+    auto FixOne = [&](Vertex& v)
+        {
+            float nx = v.normal[0], ny = v.normal[1], nz = v.normal[2];
+            Normalize3(nx, ny, nz);
+
+            float dotNT = Dot3(nx, ny, nz, tx, ty, tz);
+            float tpx = tx - nx * dotNT;
+            float tpy = ty - ny * dotNT;
+            float tpz = tz - nz * dotNT;
+            Normalize3(tpx, tpy, tpz);
+
+            float cx, cy, cz;
+            Cross3(nx, ny, nz, tpx, tpy, tpz, cx, cy, cz);
+            float sign = (Dot3(cx, cy, cz, bx, by, bz) < 0.f) ? -1.f : 1.f;
+
+            v.tangent[0] = tpx; v.tangent[1] = tpy; v.tangent[2] = tpz; v.tangent[3] = sign;
+        };
+
+    FixOne(a); FixOne(b); FixOne(c);
+}
+
+
 // ==========================================================
 // Material 섹션
 // ==========================================================
@@ -146,6 +242,7 @@ static void WriteMaterialSection()
     {
         WriteStringUtf8(m.name);
         WriteStringUtf8(m.diffuseTextureName);
+        WriteStringUtf8(m.normalTextureName);
     }
 }
 
@@ -158,7 +255,7 @@ static void WriteModelHeader()
     char magic[4] = { 'M', 'B', 'I', 'N' };
     WriteRaw(magic, 4);
 
-    uint32_t version = 1;
+    uint32_t version = 2;
     uint32_t flags = 0;
     uint32_t boneCount = 0; // 비스킨 전용
     uint32_t materialCount = (uint32_t)g_Materials.size();
@@ -201,6 +298,7 @@ static void WriteSubMeshSection()
             WriteFloatArray(v.position, 3);
             WriteFloatArray(v.normal, 3);
             WriteFloatArray(v.uv, 2);
+            WriteFloatArray(v.tangent, 4);
 
             // 엔진 포맷 유지용(항상 0)
             WriteRaw(v.boneIndices, sizeof(uint32_t) * 4);
@@ -262,22 +360,13 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
 
                 Material m{};
                 m.name = matName;
-                m.diffuseTextureName.clear();
 
-                FbxProperty prop = mat->FindProperty(FbxSurfaceMaterial::sDiffuse);
-                if (prop.IsValid())
-                {
-                    int texCount = prop.GetSrcObjectCount<FbxTexture>();
-                    if (texCount > 0)
-                    {
-                        FbxFileTexture* tex = FbxCast<FbxFileTexture>(prop.GetSrcObject<FbxTexture>(0));
-                        if (tex)
-                        {
-                            const char* fn = tex->GetFileName();
-                            m.diffuseTextureName = SafeStemFromFbxFileName(fn);
-                        }
-                    }
-                }
+                m.diffuseTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sDiffuse));
+
+                m.normalTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sNormalMap));
+                if (m.normalTextureName.empty())
+                    m.normalTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sBump));
+
 
                 uint32_t idx = (uint32_t)g_Materials.size();
                 g_Materials.push_back(m);
@@ -295,7 +384,9 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
         const auto& m = g_Materials[i];
         DLOG("  ["); DLOG(i); DLOG("] ");
         DLOG("name=\""); DLOG(m.name); DLOG("\" ");
-        DLOG("diffuse=\""); DLOG(m.diffuseTextureName); DLOGLN("\"");
+        DLOG("diffuse=\""); DLOG(m.diffuseTextureName); DLOG("\" ");
+        DLOG("normal=\"");  DLOG(m.normalTextureName);  DLOGLN("\"");
+
     }
 #endif
 
@@ -383,29 +474,30 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
 
         for (int p = 0; p < polyCount; ++p)
         {
-            int idx[3] = { 0,1,2 };
-            if (flip) std::swap(idx[1], idx[2]);
+            int order[3] = { 0,1,2 };
+            if (flip) std::swap(order[1], order[2]);
+
+            Vertex triV[3]{};
 
             for (int k = 0; k < 3; ++k)
             {
-                int cpIdx = mesh->GetPolygonVertex(p, idx[k]);
-                if (cpIdx < 0 || cpIdx >= cpCount) continue;
+                int vi = order[k];
+                int cpIdx = mesh->GetPolygonVertex(p, vi);
+                if (cpIdx < 0 || cpIdx >= cpCount) { triV[k] = Vertex{}; continue; }
 
                 Vertex v{};
-                // bone data는 항상 0
                 for (int i = 0; i < 4; ++i) { v.boneIndices[i] = 0; v.boneWeights[i] = 0.0f; }
 
                 // position bake
                 FbxVector4 posL = cp[cpIdx];
                 FbxVector4 posW = xform.MultT(posL);
-
                 v.position[0] = (float)posW[0] * FINAL_SCALE_F;
                 v.position[1] = (float)posW[1] * FINAL_SCALE_F;
                 v.position[2] = (float)posW[2] * FINAL_SCALE_F;
 
                 // normal bake
                 FbxVector4 nL;
-                mesh->GetPolygonVertexNormal(p, idx[k], nL);
+                mesh->GetPolygonVertexNormal(p, vi, nL);
                 FbxVector4 nW = nMat.MultT(nL);
                 nW.Normalize();
                 v.normal[0] = (float)nW[0];
@@ -415,29 +507,39 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
                 // UV
                 if (hasUVSet)
                 {
-                    FbxVector2 uv;
-                    bool unmapped = false;
-                    if (mesh->GetPolygonVertexUV(p, idx[k], uvSetName, uv, unmapped))
+                    FbxVector2 uv; bool unmapped = false;
+                    if (mesh->GetPolygonVertexUV(p, vi, uvSetName, uv, unmapped))
                     {
                         v.uv[0] = (float)uv[0];
                         v.uv[1] = 1.0f - (float)uv[1];
                     }
                     else
                     {
-                        v.uv[0] = 0.0f;
-                        v.uv[1] = 0.0f;
+                        v.uv[0] = v.uv[1] = 0.0f;
                     }
                 }
                 else
                 {
-                    v.uv[0] = 0.0f;
-                    v.uv[1] = 0.0f;
+                    v.uv[0] = v.uv[1] = 0.0f;
                 }
 
-                sm.vertices.push_back(v);
-                sm.indices.push_back((uint32_t)sm.indices.size());
+                triV[k] = v;
             }
+
+            // tangent 계산(현재 order가 이미 flip 반영됨)
+            ComputeTangentForTri(triV[0], triV[1], triV[2]);
+
+            // push
+            uint32_t base = (uint32_t)sm.vertices.size();
+            sm.vertices.push_back(triV[0]);
+            sm.vertices.push_back(triV[1]);
+            sm.vertices.push_back(triV[2]);
+
+            sm.indices.push_back(base + 0);
+            sm.indices.push_back(base + 1);
+            sm.indices.push_back(base + 2);
         }
+
 
         // 빈 메시 방지
         if (!sm.vertices.empty())
