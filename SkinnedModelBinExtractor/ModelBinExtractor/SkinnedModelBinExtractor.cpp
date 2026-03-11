@@ -22,6 +22,22 @@ static constexpr double EXPORT_SCALE_D = 0.01;
 static constexpr float  EXPORT_SCALE_F = 0.01f;
 static constexpr bool MIRROR_X_EXPORT = true;
 
+static FbxAMatrix MakeRotateXMinus90()
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(-90.0, 0.0, 0.0));
+    return R;
+}
+
+static FbxAMatrix MakeRotateY180()
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(0.0, 180.0, 0.0));
+    return R;
+}
+
 #define DEBUGLOG 1
 
 #if DEBUGLOG
@@ -567,6 +583,11 @@ static void ExtractFromFBX(FbxScene* scene)
     S.SetRow(2, FbxVector4(0, 0, 1, 0));
     S.SetRow(3, FbxVector4(0, 0, 0, 1));
 
+    FbxAMatrix Rx = MakeRotateXMinus90();
+    FbxAMatrix Ry = MakeRotateY180();
+    FbxAMatrix R = Ry * Rx;
+    FbxAMatrix RInv = R.Inverse();
+
     for (int i = 0; i < boneCount; ++i)
     {
         auto itN = g_BoneNameToNode.find(g_Bones[i].name);
@@ -588,6 +609,8 @@ static void ExtractFromFBX(FbxScene* scene)
         t[1] *= EXPORT_SCALE_D;
         t[2] *= EXPORT_SCALE_D;
         boneInMesh.SetT(t);
+
+        boneInMesh = R * boneInMesh * RInv;
 
         if (MIRROR_X_EXPORT)
             boneInMesh = S * boneInMesh * S;
@@ -756,6 +779,7 @@ static void ExtractFromFBX(FbxScene* scene)
 
                 // position (base 공간으로 변환)
                 FbxVector4 p4 = toBase.MultT(cp[cpIdx]);
+                p4 = R.MultT(p4);
                 if (MIRROR_X_EXPORT) p4[0] = -p4[0];
                 triV[k].position[0] = (float)p4[0] * EXPORT_SCALE_F;
                 triV[k].position[1] = (float)p4[1] * EXPORT_SCALE_F;
@@ -766,6 +790,7 @@ static void ExtractFromFBX(FbxScene* scene)
                 mesh->GetPolygonVertexNormal(p, k, nL);
                 FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
                 FbxVector4 nW = toBase.MultT(n4);
+                nW = R.MultT(nW);
                 if (MIRROR_X_EXPORT) nW[0] = -nW[0];
 
                 nW.Normalize();

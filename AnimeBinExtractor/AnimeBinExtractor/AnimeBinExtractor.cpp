@@ -25,6 +25,21 @@ static FbxAMatrix MakeMirrorX()
     return S;
 }
 
+static FbxAMatrix MakeRotateXMinus90()
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(-90.0, 0.0, 0.0));
+    return R;
+}
+
+static FbxAMatrix MakeRotateY180()
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(0.0, 180.0, 0.0));
+    return R;
+}
 
 // =========================================================
 // 옵션
@@ -225,18 +240,25 @@ static void TraverseAndExtractTracks(
 
             // 로컬 TRS (DirectX + meter 변환 이후 값)
             FbxAMatrix fbxLocal = node->EvaluateLocalTransform(t);
+
+            static FbxAMatrix RotX = MakeRotateXMinus90();
+            static FbxAMatrix RotY = MakeRotateY180();
+            static FbxAMatrix BasisRot = RotY * RotX;
+            static FbxAMatrix BasisRotInv = BasisRot.Inverse();
+            fbxLocal = BasisRot * fbxLocal * BasisRotInv;
+
             if (MIRROR_X_EXPORT)
             {
-                static FbxAMatrix Sx = MakeMirrorX();
-                fbxLocal = Sx * fbxLocal * Sx;   // ★ 모델 추출기와 동일한 공액변환
+                static FbxAMatrix MirrorX = MakeMirrorX();
+                fbxLocal = MirrorX * fbxLocal * MirrorX;   // ★ 모델 추출기와 동일한 공액변환
             }
 
-            FbxVector4     T = fbxLocal.GetT();
-            FbxQuaternion  R = fbxLocal.GetQ();
-            FbxVector4     S = fbxLocal.GetS();
+            FbxVector4 T = fbxLocal.GetT();
+            FbxQuaternion Q = fbxLocal.GetQ();
+            FbxVector4 Scale = fbxLocal.GetS();
 
             // quaternion 정규화(수치 안정성)
-            R.Normalize();
+            Q.Normalize();
 
             KeyframeBin k{};
             k.timeSec = (float)((t.GetSecondDouble() - startSec) * timeScale);
@@ -246,14 +268,14 @@ static void TraverseAndExtractTracks(
             k.ty = (float)T[1] * EXPORT_SCALE_F;
             k.tz = (float)T[2] * EXPORT_SCALE_F;
 
-            k.rx = (float)R[0];
-            k.ry = (float)R[1];
-            k.rz = (float)R[2];
-            k.rw = (float)R[3];
+            k.rx = (float)Q[0];
+            k.ry = (float)Q[1];
+            k.rz = (float)Q[2];
+            k.rw = (float)Q[3];
 
-            k.sx = (float)S[0];
-            k.sy = (float)S[1];
-            k.sz = (float)S[2];
+            k.sx = (float)Scale[0];
+            k.sy = (float)Scale[1];
+            k.sz = (float)Scale[2];
 
             track.keys.push_back(k);
         }
@@ -319,17 +341,24 @@ static void DumpAnimExtractorDebug(
             if (!n) { cout << "  [" << label << "] node=null\n"; return; }
 
             FbxAMatrix L = n->EvaluateLocalTransform(t);
-            if (MIRROR_X_EXPORT) { static FbxAMatrix Sx = MakeMirrorX(); L = Sx * L * Sx; }
+
+            static FbxAMatrix RotX = MakeRotateXMinus90();
+            static FbxAMatrix RotY = MakeRotateY180();
+            static FbxAMatrix BasisRot = RotY * RotX;
+            static FbxAMatrix BasisRotInv = BasisRot.Inverse();
+            L = BasisRot * L * BasisRotInv;
+
+            if (MIRROR_X_EXPORT) { static FbxAMatrix MirrorX = MakeMirrorX(); L = MirrorX * L * MirrorX; }
 
             FbxVector4 T = L.GetT();
-            FbxQuaternion R = L.GetQ(); R.Normalize();
+            FbxQuaternion Q = L.GetQ(); Q.Normalize();
             FbxVector4 S = L.GetS();
 
             cout << "  [" << label << "] " << n->GetName()
                 << " det3=" << Det3x3(L)
                 << " T=(" << (double)T[0] << "," << (double)T[1] << "," << (double)T[2] << ")"
                 << " S=(" << (double)S[0] << "," << (double)S[1] << "," << (double)S[2] << ")"
-                << " Q=(" << (double)R[0] << "," << (double)R[1] << "," << (double)R[2] << "," << (double)R[3] << ")"
+                << " Q=(" << (double)Q[0] << "," << (double)Q[1] << "," << (double)Q[2] << "," << (double)Q[3] << ")"
                 << "\n";
         };
 
