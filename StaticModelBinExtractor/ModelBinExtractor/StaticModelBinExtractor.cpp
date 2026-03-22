@@ -348,6 +348,25 @@ static void FillTexTransformFromProperty(FbxProperty prop, MaterialTexTransform&
     outTransform.wrapMode[1] = EncodeWrapMode(tex->GetWrapModeV());
 }
 
+static bool IsNearlyBlack3(const float c[4], float eps = 1e-6f)
+{
+    return
+        (fabsf(c[0]) <= eps) &&
+        (fabsf(c[1]) <= eps) &&
+        (fabsf(c[2]) <= eps);
+}
+
+static bool IsIdentityTexTransform(const MaterialTexTransform& t, float eps = 1e-6f)
+{
+    return
+        (fabsf(t.scale[0] - 1.0f) <= eps) &&
+        (fabsf(t.scale[1] - 1.0f) <= eps) &&
+        (fabsf(t.offset[0]) <= eps) &&
+        (fabsf(t.offset[1]) <= eps) &&
+        (t.wrapMode[0] == 0u) &&
+        (t.wrapMode[1] == 0u);
+}
+
 static void ExtractMaterialAttributes(FbxSurfaceMaterial* mat, Material& outMat)
 {
     if (!mat) return;
@@ -360,6 +379,11 @@ static void ExtractMaterialAttributes(FbxSurfaceMaterial* mat, Material& outMat)
 
     outMat.diffuseTextureName = ExtractFirstTextureStem(diffuseProp);
     outMat.normalTextureName = ExtractFirstTextureStem(normalProp);
+    outMat.emissiveTextureName = ExtractFirstTextureStem(emissiveProp);
+    outMat.specularTextureName = ExtractFirstTextureStem(specularProp);
+
+    FillTexTransformFromProperty(diffuseProp, outMat.diffuseTransform);
+
     if (outMat.normalTextureName.empty())
     {
         outMat.normalTextureName = ExtractFirstTextureStem(bumpProp);
@@ -370,10 +394,6 @@ static void ExtractMaterialAttributes(FbxSurfaceMaterial* mat, Material& outMat)
         FillTexTransformFromProperty(normalProp, outMat.normalTransform);
     }
 
-    outMat.emissiveTextureName = ExtractFirstTextureStem(emissiveProp);
-    outMat.specularTextureName = ExtractFirstTextureStem(specularProp);
-
-    FillTexTransformFromProperty(diffuseProp, outMat.diffuseTransform);
     FillTexTransformFromProperty(emissiveProp, outMat.emissiveTransform);
     FillTexTransformFromProperty(specularProp, outMat.specularTransform);
 
@@ -394,6 +414,47 @@ static void ExtractMaterialAttributes(FbxSurfaceMaterial* mat, Material& outMat)
         const double sf = phong->SpecularFactor.Get();
         const double shininess = phong->Shininess.Get();
         FillColor4(outMat.specularColor, s[0] * sf, s[1] * sf, s[2] * sf, shininess);
+    }
+
+    if (!outMat.normalTextureName.empty() &&
+        IsIdentityTexTransform(outMat.normalTransform) &&
+        !IsIdentityTexTransform(outMat.diffuseTransform))
+    {
+        outMat.normalTransform = outMat.diffuseTransform;
+    }
+
+    if (!outMat.emissiveTextureName.empty() &&
+        IsIdentityTexTransform(outMat.emissiveTransform) &&
+        !IsIdentityTexTransform(outMat.diffuseTransform))
+    {
+        outMat.emissiveTransform = outMat.diffuseTransform;
+    }
+
+    if (!outMat.specularTextureName.empty() &&
+        IsIdentityTexTransform(outMat.specularTransform) &&
+        !IsIdentityTexTransform(outMat.diffuseTransform))
+    {
+        outMat.specularTransform = outMat.diffuseTransform;
+    }
+
+    if (!outMat.emissiveTextureName.empty() && IsNearlyBlack3(outMat.emissiveColor))
+    {
+        FillColor4(outMat.emissiveColor, 1.0, 1.0, 1.0, 1.0);
+    }
+
+    if (!outMat.specularTextureName.empty())
+    {
+        if (IsNearlyBlack3(outMat.specularColor))
+        {
+            outMat.specularColor[0] = 1.0f;
+            outMat.specularColor[1] = 1.0f;
+            outMat.specularColor[2] = 1.0f;
+        }
+
+        if (outMat.specularColor[3] <= 0.0f)
+        {
+            outMat.specularColor[3] = 32.0f;
+        }
     }
 }
 
