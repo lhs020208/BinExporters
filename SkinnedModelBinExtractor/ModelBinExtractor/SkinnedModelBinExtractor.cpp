@@ -22,20 +22,42 @@ static constexpr double EXPORT_SCALE_D = 0.01;
 static constexpr float  EXPORT_SCALE_F = 0.01f;
 static constexpr bool MIRROR_X_EXPORT = true;
 
-static FbxAMatrix MakeRotateXMinus90()
+static constexpr double EXPORT_ROT_X_DEG = -90.0;
+static constexpr double EXPORT_ROT_Y_DEG = 0.0;
+static constexpr double EXPORT_ROT_Z_DEG = 0.0;
+
+static FbxAMatrix MakeRotateX(double deg)
 {
     FbxAMatrix R;
     R.SetIdentity();
-    R.SetR(FbxVector4(-90.0, 0.0, 0.0));
+    R.SetR(FbxVector4(deg, 0.0, 0.0, 0.0));
     return R;
 }
 
-static FbxAMatrix MakeRotateY180()
+static FbxAMatrix MakeRotateY(double deg)
 {
     FbxAMatrix R;
     R.SetIdentity();
-    R.SetR(FbxVector4(0.0, 180.0, 0.0));
+    R.SetR(FbxVector4(0.0, deg, 0.0, 0.0));
     return R;
+}
+
+static FbxAMatrix MakeRotateZ(double deg)
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(0.0, 0.0, deg, 0.0));
+    return R;
+}
+
+static FbxAMatrix BuildExportRotation()
+{
+    const FbxAMatrix Rx = MakeRotateX(EXPORT_ROT_X_DEG);
+    const FbxAMatrix Ry = MakeRotateY(EXPORT_ROT_Y_DEG);
+    const FbxAMatrix Rz = MakeRotateZ(EXPORT_ROT_Z_DEG);
+
+    // 적용 순서: X -> Y -> Z
+    return Rz * Ry * Rx;
 }
 
 #define DEBUGLOG 1
@@ -69,10 +91,29 @@ struct Vertex {
     float boneWeights[4];
 };
 
-struct Material {
-    string name;               // material 이름 (ex: "face")
-    string diffuseTextureName; // texture 파일명 base (ex: "face")
+struct MaterialTexTransform
+{
+    float scale[2] = { 1.0f, 1.0f };
+    float offset[2] = { 0.0f, 0.0f };
+    uint32_t wrapMode[2] = { 0u, 0u }; // 0=Repeat, 1=Clamp
+};
+
+struct Material
+{
+    string name;
+    string diffuseTextureName;
     string normalTextureName;
+    string emissiveTextureName;
+    string specularTextureName;
+
+    float diffuseColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float emissiveColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    float specularColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // rgb=specular, a=shininess
+
+    MaterialTexTransform diffuseTransform;
+    MaterialTexTransform normalTransform;
+    MaterialTexTransform emissiveTransform;
+    MaterialTexTransform specularTransform;
 };
 
 struct SubMesh {
@@ -151,6 +192,13 @@ static void WriteStringUtf8(const std::string& s)
         WriteRaw(s.data(), len);
 }
 
+static void WriteMaterialTexTransform(const MaterialTexTransform& t)
+{
+    WriteFloatArray(t.scale, 2);
+    WriteFloatArray(t.offset, 2);
+    WriteRaw(t.wrapMode, sizeof(uint32_t) * 2);
+}
+
 static void WriteMaterialSection()
 {
     for (auto& m : g_Materials)
@@ -158,6 +206,17 @@ static void WriteMaterialSection()
         WriteStringUtf8(m.name);
         WriteStringUtf8(m.diffuseTextureName);
         WriteStringUtf8(m.normalTextureName);
+        WriteStringUtf8(m.emissiveTextureName);
+        WriteStringUtf8(m.specularTextureName);
+
+        WriteFloatArray(m.diffuseColor, 4);
+        WriteFloatArray(m.emissiveColor, 4);
+        WriteFloatArray(m.specularColor, 4);
+
+        WriteMaterialTexTransform(m.diffuseTransform);
+        WriteMaterialTexTransform(m.normalTransform);
+        WriteMaterialTexTransform(m.emissiveTransform);
+        WriteMaterialTexTransform(m.specularTransform);
     }
 }
 
@@ -169,7 +228,7 @@ static void WriteModelHeader()
     char magic[4] = { 'M', 'B', 'I', 'N' };
     WriteRaw(magic, 4);
 
-    uint32_t version = 2;
+    uint32_t version = 3;
     uint32_t flags = 0;
     uint32_t boneCount = (uint32_t)g_Bones.size();
     uint32_t materialCount = (uint32_t)g_Materials.size();
@@ -267,6 +326,323 @@ static std::string ExtractFirstTextureStem(FbxProperty prop)
     return "";
 }
 
+static FbxTexture* ExtractFirstTextureObject(FbxProperty prop)
+{
+    if (!prop.IsValid()) return nullptr;
+
+    if (prop.GetSrcObjectCount<FbxLayeredTexture>() > 0)
+    {
+        auto* layered = prop.GetSrcObject<FbxLayeredTexture>(0);
+        if (layered && layered->GetSrcObjectCount<FbxTexture>() > 0)
+            return layered->GetSrcObject<FbxTexture>(0);
+        return nullptr;
+    }
+
+    if (prop.GetSrcObjectCount<FbxTexture>() > 0)
+        return prop.GetSrcObject<FbxTexture>(0);
+
+    return nullptr;
+}
+
+static const char* WrapModeToString(FbxTexture::EWrapMode mode)
+{
+    switch (mode)
+    {
+    case FbxTexture::eRepeat: return "Repeat";
+    case FbxTexture::eClamp:  return "Clamp";
+    default:                  return "Unknown";
+    }
+}
+
+static const char* MaterialClassToString(FbxSurfaceMaterial* mat)
+{
+    if (!mat) return "null";
+    if (FbxCast<FbxSurfacePhong>(mat))   return "Phong";
+    if (FbxCast<FbxSurfaceLambert>(mat)) return "Lambert";
+    return "Other";
+}
+
+static void DumpDouble3Value(const char* label, const FbxDouble3& v)
+{
+    DLOG("  ");
+    DLOG(label);
+    DLOG(" = (");
+    DLOG(v[0]); DLOG(", ");
+    DLOG(v[1]); DLOG(", ");
+    DLOG(v[2]); DLOGLN(")");
+}
+
+static void DumpDoubleValue(const char* label, double v)
+{
+    DLOG("  ");
+    DLOG(label);
+    DLOG(" = ");
+    DLOGLN(v);
+}
+
+static void DumpTextureSlotDebug(const char* slotName, FbxProperty prop)
+{
+    DLOG("  [TextureSlot] ");
+    DLOG(slotName);
+
+    if (!prop.IsValid())
+    {
+        DLOGLN(" : property invalid");
+        return;
+    }
+
+    const bool hasLayered = (prop.GetSrcObjectCount<FbxLayeredTexture>() > 0);
+    FbxTexture* tex = ExtractFirstTextureObject(prop);
+
+    if (!tex)
+    {
+        DLOG(" : connected=0");
+        DLOG(" layered="); DLOG(hasLayered ? 1 : 0);
+        DLOGLN("");
+        return;
+    }
+
+    auto* fileTex = FbxCast<FbxFileTexture>(tex);
+
+    DLOG(" : connected=1");
+    DLOG(" layered="); DLOG(hasLayered ? 1 : 0);
+    DLOG(" type=\""); DLOG(fileTex ? "FileTexture" : "Texture"); DLOG("\"");
+
+    DLOG(" scale=(");
+    DLOG(tex->GetScaleU()); DLOG(", ");
+    DLOG(tex->GetScaleV()); DLOG(")");
+
+    DLOG(" trans=(");
+    DLOG(tex->GetTranslationU()); DLOG(", ");
+    DLOG(tex->GetTranslationV()); DLOG(")");
+
+    DLOG(" wrap=(");
+    DLOG(WrapModeToString(tex->GetWrapModeU())); DLOG(", ");
+    DLOG(WrapModeToString(tex->GetWrapModeV())); DLOG(")");
+
+    if (fileTex)
+    {
+        const char* fileName = fileTex->GetFileName();
+        DLOG(" file=\""); DLOG(fileName ? fileName : ""); DLOG("\"");
+        DLOG(" stem=\""); DLOG(SafeStemFromFbxFileName(fileName)); DLOG("\"");
+    }
+
+    DLOGLN("");
+}
+
+static void DumpMaterialDebug(FbxSurfaceMaterial* mat)
+{
+    if (!mat)
+    {
+        DLOGLN("[MaterialDump] null");
+        return;
+    }
+
+    DLOGLN("\n--------------------------------------------------");
+    DLOG("[MaterialDump] name=\""); DLOG(mat->GetName()); DLOG("\" ");
+    DLOG("class=\""); DLOG(MaterialClassToString(mat)); DLOGLN("\"");
+
+    if (auto* lambert = FbxCast<FbxSurfaceLambert>(mat))
+    {
+        DumpDouble3Value("Lambert.Ambient", lambert->Ambient.Get());
+        DumpDoubleValue("Lambert.AmbientFactor", lambert->AmbientFactor.Get());
+
+        DumpDouble3Value("Lambert.Diffuse", lambert->Diffuse.Get());
+        DumpDoubleValue("Lambert.DiffuseFactor", lambert->DiffuseFactor.Get());
+
+        DumpDouble3Value("Lambert.Emissive", lambert->Emissive.Get());
+        DumpDoubleValue("Lambert.EmissiveFactor", lambert->EmissiveFactor.Get());
+
+        DumpDouble3Value("Lambert.TransparentColor", lambert->TransparentColor.Get());
+        DumpDoubleValue("Lambert.TransparencyFactor", lambert->TransparencyFactor.Get());
+    }
+
+    if (auto* phong = FbxCast<FbxSurfacePhong>(mat))
+    {
+        DumpDouble3Value("Phong.Specular", phong->Specular.Get());
+        DumpDoubleValue("Phong.SpecularFactor", phong->SpecularFactor.Get());
+        DumpDoubleValue("Phong.Shininess", phong->Shininess.Get());
+        DumpDouble3Value("Phong.Reflection", phong->Reflection.Get());
+        DumpDoubleValue("Phong.ReflectionFactor", phong->ReflectionFactor.Get());
+    }
+
+    DumpTextureSlotDebug("Diffuse", mat->FindProperty(FbxSurfaceMaterial::sDiffuse));
+    DumpTextureSlotDebug("NormalMap", mat->FindProperty(FbxSurfaceMaterial::sNormalMap));
+    DumpTextureSlotDebug("Bump", mat->FindProperty(FbxSurfaceMaterial::sBump));
+    DumpTextureSlotDebug("Emissive", mat->FindProperty(FbxSurfaceMaterial::sEmissive));
+    DumpTextureSlotDebug("Specular", mat->FindProperty(FbxSurfaceMaterial::sSpecular));
+}
+
+static uint32_t EncodeWrapMode(FbxTexture::EWrapMode mode)
+{
+    return (mode == FbxTexture::eClamp) ? 1u : 0u;
+}
+
+static void FillColor4(float out[4], double x, double y, double z, double w)
+{
+    out[0] = (float)x;
+    out[1] = (float)y;
+    out[2] = (float)z;
+    out[3] = (float)w;
+}
+
+static void FillTexTransformFromProperty(FbxProperty prop, MaterialTexTransform& outTransform)
+{
+    outTransform = MaterialTexTransform{};
+
+    FbxTexture* tex = ExtractFirstTextureObject(prop);
+    if (!tex) return;
+
+    outTransform.scale[0] = (float)tex->GetScaleU();
+    outTransform.scale[1] = (float)tex->GetScaleV();
+    outTransform.offset[0] = (float)tex->GetTranslationU();
+    outTransform.offset[1] = (float)tex->GetTranslationV();
+    outTransform.wrapMode[0] = EncodeWrapMode(tex->GetWrapModeU());
+    outTransform.wrapMode[1] = EncodeWrapMode(tex->GetWrapModeV());
+}
+
+static bool IsNearlyBlack3(const float c[4], float eps = 1e-6f)
+{
+    return
+        (fabsf(c[0]) <= eps) &&
+        (fabsf(c[1]) <= eps) &&
+        (fabsf(c[2]) <= eps);
+}
+
+static bool IsIdentityTexTransform(const MaterialTexTransform& t, float eps = 1e-6f)
+{
+    return
+        (fabsf(t.scale[0] - 1.0f) <= eps) &&
+        (fabsf(t.scale[1] - 1.0f) <= eps) &&
+        (fabsf(t.offset[0]) <= eps) &&
+        (fabsf(t.offset[1]) <= eps) &&
+        (t.wrapMode[0] == 0u) &&
+        (t.wrapMode[1] == 0u);
+}
+
+static void ExtractMaterialAttributes(FbxSurfaceMaterial* mat, Material& outMat)
+{
+    if (!mat) return;
+
+    FbxProperty diffuseProp = mat->FindProperty(FbxSurfaceMaterial::sDiffuse);
+    FbxProperty normalProp = mat->FindProperty(FbxSurfaceMaterial::sNormalMap);
+    FbxProperty bumpProp = mat->FindProperty(FbxSurfaceMaterial::sBump);
+    FbxProperty emissiveProp = mat->FindProperty(FbxSurfaceMaterial::sEmissive);
+    FbxProperty specularProp = mat->FindProperty(FbxSurfaceMaterial::sSpecular);
+
+    outMat.diffuseTextureName = ExtractFirstTextureStem(diffuseProp);
+    outMat.normalTextureName = ExtractFirstTextureStem(normalProp);
+    outMat.emissiveTextureName = ExtractFirstTextureStem(emissiveProp);
+    outMat.specularTextureName = ExtractFirstTextureStem(specularProp);
+
+    FillTexTransformFromProperty(diffuseProp, outMat.diffuseTransform);
+
+    if (outMat.normalTextureName.empty())
+    {
+        outMat.normalTextureName = ExtractFirstTextureStem(bumpProp);
+        FillTexTransformFromProperty(bumpProp, outMat.normalTransform);
+    }
+    else
+    {
+        FillTexTransformFromProperty(normalProp, outMat.normalTransform);
+    }
+
+    FillTexTransformFromProperty(emissiveProp, outMat.emissiveTransform);
+    FillTexTransformFromProperty(specularProp, outMat.specularTransform);
+
+    if (auto* lambert = FbxCast<FbxSurfaceLambert>(mat))
+    {
+        const FbxDouble3 d = lambert->Diffuse.Get();
+        const double df = lambert->DiffuseFactor.Get();
+        FillColor4(outMat.diffuseColor, d[0] * df, d[1] * df, d[2] * df, 1.0);
+
+        const FbxDouble3 e = lambert->Emissive.Get();
+        const double ef = lambert->EmissiveFactor.Get();
+        FillColor4(outMat.emissiveColor, e[0] * ef, e[1] * ef, e[2] * ef, 1.0);
+    }
+
+    if (auto* phong = FbxCast<FbxSurfacePhong>(mat))
+    {
+        const FbxDouble3 s = phong->Specular.Get();
+        const double sf = phong->SpecularFactor.Get();
+        const double shininess = phong->Shininess.Get();
+        FillColor4(outMat.specularColor, s[0] * sf, s[1] * sf, s[2] * sf, shininess);
+    }
+
+    if (!outMat.normalTextureName.empty() &&
+        IsIdentityTexTransform(outMat.normalTransform) &&
+        !IsIdentityTexTransform(outMat.diffuseTransform))
+    {
+        outMat.normalTransform = outMat.diffuseTransform;
+    }
+
+    if (!outMat.emissiveTextureName.empty() &&
+        IsIdentityTexTransform(outMat.emissiveTransform) &&
+        !IsIdentityTexTransform(outMat.diffuseTransform))
+    {
+        outMat.emissiveTransform = outMat.diffuseTransform;
+    }
+
+    if (!outMat.specularTextureName.empty() &&
+        IsIdentityTexTransform(outMat.specularTransform) &&
+        !IsIdentityTexTransform(outMat.diffuseTransform))
+    {
+        outMat.specularTransform = outMat.diffuseTransform;
+    }
+
+    if (!outMat.emissiveTextureName.empty() && IsNearlyBlack3(outMat.emissiveColor))
+    {
+        FillColor4(outMat.emissiveColor, 1.0, 1.0, 1.0, 1.0);
+    }
+
+    if (!outMat.specularTextureName.empty())
+    {
+        if (IsNearlyBlack3(outMat.specularColor))
+        {
+            outMat.specularColor[0] = 1.0f;
+            outMat.specularColor[1] = 1.0f;
+            outMat.specularColor[2] = 1.0f;
+        }
+
+        if (outMat.specularColor[3] <= 0.0f)
+        {
+            outMat.specularColor[3] = 32.0f;
+        }
+    }
+}
+
+static int GetPolygonMaterialSlot(FbxNode* node, FbxMesh* mesh, int polygonIndex)
+{
+    if (!node || !mesh) return 0;
+
+    const int nodeMaterialCount = node->GetMaterialCount();
+    if (nodeMaterialCount <= 1) return 0;
+
+    FbxGeometryElementMaterial* matElem = mesh->GetElementMaterial();
+    if (!matElem) return 0;
+
+    int localMaterialSlot = 0;
+
+    if (matElem->GetMappingMode() == FbxGeometryElement::eByPolygon)
+    {
+        if (polygonIndex >= 0 && polygonIndex < matElem->GetIndexArray().GetCount())
+            localMaterialSlot = matElem->GetIndexArray().GetAt(polygonIndex);
+    }
+    else if (matElem->GetMappingMode() == FbxGeometryElement::eAllSame)
+    {
+        if (matElem->GetIndexArray().GetCount() > 0)
+            localMaterialSlot = matElem->GetIndexArray().GetAt(0);
+    }
+    else
+    {
+        localMaterialSlot = 0;
+    }
+
+    if (localMaterialSlot < 0 || localMaterialSlot >= nodeMaterialCount)
+        localMaterialSlot = 0;
+
+    return localMaterialSlot;
+}
 static void ComputeTangentForTri(Vertex& a, Vertex& b, Vertex& c)
 {
     // p, uv
@@ -583,9 +959,7 @@ static void ExtractFromFBX(FbxScene* scene)
     S.SetRow(2, FbxVector4(0, 0, 1, 0));
     S.SetRow(3, FbxVector4(0, 0, 0, 1));
 
-    FbxAMatrix Rx = MakeRotateXMinus90();
-    FbxAMatrix Ry = MakeRotateY180();
-    FbxAMatrix R = Ry * Rx;
+    FbxAMatrix R = BuildExportRotation();
     FbxAMatrix RInv = R.Inverse();
 
     for (int i = 0; i < boneCount; ++i)
@@ -672,12 +1046,11 @@ static void ExtractFromFBX(FbxScene* scene)
 
                 Material m{};
                 m.name = matName;
-                m.diffuseTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sDiffuse));
+                ExtractMaterialAttributes(mat, m);
 
-                // [추가] normal map은 NormalMap 슬롯 or Bump 슬롯에 들어오는 경우가 많아서 둘 다 시도
-                m.normalTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sNormalMap));
-                if (m.normalTextureName.empty())
-                    m.normalTextureName = ExtractFirstTextureStem(mat->FindProperty(FbxSurfaceMaterial::sBump));
+#if DEBUGLOG
+                DumpMaterialDebug(mat);
+#endif
 
                 uint32_t idx = (uint32_t)g_Materials.size();
                 g_Materials.push_back(m);
@@ -686,7 +1059,7 @@ static void ExtractFromFBX(FbxScene* scene)
 
             for (int i = 0; i < node->GetChildCount(); ++i)
                 CollectMaterials(node->GetChild(i));
-        };
+        }; 
     CollectMaterials(scene->GetRootNode());
 #if DEBUGLOG
     DLOGLN("\n[Material List]");
@@ -701,28 +1074,36 @@ static void ExtractFromFBX(FbxScene* scene)
 #endif
 
 
-    // 10) SubMesh 생성 (스킨 메시만)
+    // 10) SubMesh 생성 (스킨 메시만, material slot별 분리)
     for (int mi = 0; mi < (int)meshRefs.size(); ++mi)
     {
         FbxMesh* mesh = meshRefs[mi].mesh;
         FbxNode* node = meshRefs[mi].node;
         if (!mesh || !node) continue;
 
-        SubMesh sm{};
-        sm.meshName = node->GetName();
-        sm.materialIndex = 0;
+        const int nodeMaterialCount = std::max(1, node->GetMaterialCount());
 
-        // 재질(첫 번째 슬롯만)
-        int matCount = node->GetMaterialCount();
-        if (matCount > 0)
+        std::vector<SubMesh> splitSubMeshes(nodeMaterialCount);
+        std::vector<std::vector<int>> splitVtxCpIndex(nodeMaterialCount);
+        std::vector<bool> splitSubMeshUsed(nodeMaterialCount, false);
+
+        for (int matSlot = 0; matSlot < nodeMaterialCount; ++matSlot)
         {
-            FbxSurfaceMaterial* mat = node->GetMaterial(0);
-            if (mat)
+            uint32_t globalMaterialIndex = 0;
+
+            if (matSlot < node->GetMaterialCount())
             {
-                auto it = g_MaterialNameToIndex.find(mat->GetName());
-                if (it != g_MaterialNameToIndex.end())
-                    sm.materialIndex = it->second;
+                FbxSurfaceMaterial* mat = node->GetMaterial(matSlot);
+                if (mat)
+                {
+                    auto it = g_MaterialNameToIndex.find(mat->GetName());
+                    if (it != g_MaterialNameToIndex.end())
+                        globalMaterialIndex = it->second;
+                }
             }
+
+            splitSubMeshes[matSlot].meshName = node->GetName();
+            splitSubMeshes[matSlot].materialIndex = globalMaterialIndex;
         }
 
         int polyCount = mesh->GetPolygonCount();
@@ -743,8 +1124,9 @@ static void ExtractFromFBX(FbxScene* scene)
 
         FbxAMatrix meshG = node->EvaluateGlobalTransform();
 
-        // Geometric transform (FBX에서 메시 노드에만 붙는 별도 오프셋)
-        FbxAMatrix geo; geo.SetIdentity();
+        // Geometric transform
+        FbxAMatrix geo;
+        geo.SetIdentity();
         geo.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
         geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
         geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
@@ -752,25 +1134,35 @@ static void ExtractFromFBX(FbxScene* scene)
         // 정점은 "base mesh 기준 공간"으로 통일
         FbxAMatrix toBase = baseInv * meshG * geo;
 
-        // 미러링(det<0)이면 winding을 뒤집어야 좌우/앞뒤가 정상
-        auto Det3x3 = [](const FbxAMatrix& m) -> double
+        auto Det3x3Local = [](const FbxAMatrix& m) -> double
             {
                 double a = m.Get(0, 0), b = m.Get(0, 1), c = m.Get(0, 2);
                 double d = m.Get(1, 0), e = m.Get(1, 1), f = m.Get(1, 2);
                 double g = m.Get(2, 0), h = m.Get(2, 1), i = m.Get(2, 2);
                 return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
             };
-        bool flipWinding = (Det3x3(meshG * geo) < 0.0) ^ MIRROR_X_EXPORT;
 
-        // 정점/인덱스
-        std::vector<int> vtxCpIndex;
-        vtxCpIndex.reserve(polyCount * 3);
+        bool flipWinding = (Det3x3Local(meshG * geo) < 0.0) ^ MIRROR_X_EXPORT;
+
+        for (int matSlot = 0; matSlot < nodeMaterialCount; ++matSlot)
+        {
+            splitSubMeshes[matSlot].vertices.reserve(polyCount * 3);
+            splitSubMeshes[matSlot].indices.reserve(polyCount * 3);
+            splitVtxCpIndex[matSlot].reserve(polyCount * 3);
+        }
 
         for (int p = 0; p < polyCount; ++p)
         {
-            // triangulated라 3개 고정
+            int localMaterialSlot = GetPolygonMaterialSlot(node, mesh, p);
+            if (localMaterialSlot < 0 || localMaterialSlot >= nodeMaterialCount)
+                localMaterialSlot = 0;
+
+            SubMesh& sm = splitSubMeshes[localMaterialSlot];
+            std::vector<int>& vtxCpIndex = splitVtxCpIndex[localMaterialSlot];
+            splitSubMeshUsed[localMaterialSlot] = true;
+
             Vertex triV[3]{};
-            int    triCp[3]{ -1,-1,-1 };
+            int triCp[3]{ -1, -1, -1 };
 
             for (int k = 0; k < 3; ++k)
             {
@@ -785,7 +1177,7 @@ static void ExtractFromFBX(FbxScene* scene)
                 triV[k].position[1] = (float)p4[1] * EXPORT_SCALE_F;
                 triV[k].position[2] = (float)p4[2] * EXPORT_SCALE_F;
 
-                // normal (벡터 변환: w=0)
+                // normal
                 FbxVector4 nL;
                 mesh->GetPolygonVertexNormal(p, k, nL);
                 FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
@@ -801,7 +1193,8 @@ static void ExtractFromFBX(FbxScene* scene)
                 // UV
                 if (hasUVSet)
                 {
-                    FbxVector2 uv; bool unmapped = false;
+                    FbxVector2 uv;
+                    bool unmapped = false;
                     if (mesh->GetPolygonVertexUV(p, k, uvSetName, uv, unmapped))
                     {
                         triV[k].uv[0] = (float)uv[0];
@@ -809,29 +1202,32 @@ static void ExtractFromFBX(FbxScene* scene)
                     }
                     else
                     {
-                        triV[k].uv[0] = triV[k].uv[1] = 0.0f;
+                        triV[k].uv[0] = 0.0f;
+                        triV[k].uv[1] = 0.0f;
                     }
                 }
                 else
                 {
-                    triV[k].uv[0] = triV[k].uv[1] = 0.0f;
+                    triV[k].uv[0] = 0.0f;
+                    triV[k].uv[1] = 0.0f;
                 }
             }
 
             if (!flipWinding)
                 ComputeTangentForTri(triV[0], triV[1], triV[2]);
             else
-                ComputeTangentForTri(triV[0], triV[2], triV[1]); // 인덱스 swap과 동일한 삼각형 순서
+                ComputeTangentForTri(triV[0], triV[2], triV[1]);
 
-            // push vertices
             uint32_t base = (uint32_t)sm.vertices.size();
-            for (int k = 0; k < 3; ++k)
-            {
-                sm.vertices.push_back(triV[k]);
-                vtxCpIndex.push_back(triCp[k]);
-            }
 
-            // push indices (미러링이면 winding swap)
+            sm.vertices.push_back(triV[0]);
+            sm.vertices.push_back(triV[1]);
+            sm.vertices.push_back(triV[2]);
+
+            vtxCpIndex.push_back(triCp[0]);
+            vtxCpIndex.push_back(triCp[1]);
+            vtxCpIndex.push_back(triCp[2]);
+
             if (!flipWinding)
             {
                 sm.indices.push_back(base + 0);
@@ -846,24 +1242,31 @@ static void ExtractFromFBX(FbxScene* scene)
             }
         }
 
-        // 스킨 웨이트 채우기 (cp 인덱스 매핑은 그대로 사용)
-        FillSkinWeights(mesh, sm, vtxCpIndex);
+        for (int matSlot = 0; matSlot < nodeMaterialCount; ++matSlot)
+        {
+            SubMesh& sm = splitSubMeshes[matSlot];
 
+            if (!splitSubMeshUsed[matSlot]) continue;
+            if (sm.vertices.empty()) continue;
+
+            FillSkinWeights(mesh, sm, splitVtxCpIndex[matSlot]);
 
 #if DEBUGLOG
-        DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
-        DLOG("materialIndex="); DLOG(sm.materialIndex);
+            DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
+            DLOG("materialIndex="); DLOG(sm.materialIndex);
 
-        if (sm.materialIndex < g_Materials.size())
-        {
-            const auto& mat = g_Materials[sm.materialIndex];
-            DLOG(" ("); DLOG(mat.name); DLOG(")");
-            DLOG(" diffuse=\""); DLOG(mat.diffuseTextureName); DLOG("\"");
-        }
-        DLOGLN("");
+            if (sm.materialIndex < g_Materials.size())
+            {
+                const auto& mat = g_Materials[sm.materialIndex];
+                DLOG(" ("); DLOG(mat.name); DLOG(")");
+                DLOG(" diffuse=\""); DLOG(mat.diffuseTextureName); DLOG("\"");
+                DLOG(" normal=\""); DLOG(mat.normalTextureName); DLOG("\"");
+            }
+            DLOGLN("");
 #endif
 
-        g_SubMeshes.push_back(std::move(sm));
+            g_SubMeshes.push_back(std::move(sm));
+        }
     }
 }
 

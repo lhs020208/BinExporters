@@ -15,6 +15,10 @@ using namespace std;
 static constexpr float EXPORT_SCALE_F = 0.01f;
 static constexpr bool MIRROR_X_EXPORT = true; // 모델 추출기와 동일 옵션
 
+static constexpr double EXPORT_ROT_X_DEG = -90.0;
+static constexpr double EXPORT_ROT_Y_DEG = 0.0;
+static constexpr double EXPORT_ROT_Z_DEG = 0.0;
+
 static FbxAMatrix MakeMirrorX()
 {
     FbxAMatrix S; S.SetIdentity();
@@ -25,20 +29,38 @@ static FbxAMatrix MakeMirrorX()
     return S;
 }
 
-static FbxAMatrix MakeRotateXMinus90()
+static FbxAMatrix MakeRotateX(double deg)
 {
     FbxAMatrix R;
     R.SetIdentity();
-    R.SetR(FbxVector4(-90.0, 0.0, 0.0));
+    R.SetR(FbxVector4(deg, 0.0, 0.0, 0.0));
     return R;
 }
 
-static FbxAMatrix MakeRotateY180()
+static FbxAMatrix MakeRotateY(double deg)
 {
     FbxAMatrix R;
     R.SetIdentity();
-    R.SetR(FbxVector4(0.0, 180.0, 0.0));
+    R.SetR(FbxVector4(0.0, deg, 0.0, 0.0));
     return R;
+}
+
+static FbxAMatrix MakeRotateZ(double deg)
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(0.0, 0.0, deg, 0.0));
+    return R;
+}
+
+static FbxAMatrix BuildExportRotation()
+{
+    const FbxAMatrix Rx = MakeRotateX(EXPORT_ROT_X_DEG);
+    const FbxAMatrix Ry = MakeRotateY(EXPORT_ROT_Y_DEG);
+    const FbxAMatrix Rz = MakeRotateZ(EXPORT_ROT_Z_DEG);
+
+    // 적용 순서: X -> Y -> Z
+    return Rz * Ry * Rx;
 }
 
 // =========================================================
@@ -241,9 +263,7 @@ static void TraverseAndExtractTracks(
             // 로컬 TRS (DirectX + meter 변환 이후 값)
             FbxAMatrix fbxLocal = node->EvaluateLocalTransform(t);
 
-            static FbxAMatrix RotX = MakeRotateXMinus90();
-            static FbxAMatrix RotY = MakeRotateY180();
-            static FbxAMatrix BasisRot = RotY * RotX;
+            static FbxAMatrix BasisRot = BuildExportRotation();
             static FbxAMatrix BasisRotInv = BasisRot.Inverse();
             fbxLocal = BasisRot * fbxLocal * BasisRotInv;
 
@@ -342,9 +362,7 @@ static void DumpAnimExtractorDebug(
 
             FbxAMatrix L = n->EvaluateLocalTransform(t);
 
-            static FbxAMatrix RotX = MakeRotateXMinus90();
-            static FbxAMatrix RotY = MakeRotateY180();
-            static FbxAMatrix BasisRot = RotY * RotX;
+            static FbxAMatrix BasisRot = BuildExportRotation();
             static FbxAMatrix BasisRotInv = BasisRot.Inverse();
             L = BasisRot * L * BasisRotInv;
 
