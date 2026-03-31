@@ -13,6 +13,10 @@
 using namespace std;
 static constexpr float EXPORT_SCALE_F = 0.01f;
 
+static constexpr double EXPORT_ROT_X_DEG = 0.0;
+static constexpr double EXPORT_ROT_Y_DEG = 0.0;
+static constexpr double EXPORT_ROT_Z_DEG = 0.0;
+
 // =========================================================
 // 옵션
 // 1: Skeleton(eSkeleton) 노드만 트랙 생성 (권장: 불필요 노드 트랙 방지)
@@ -71,6 +75,57 @@ static bool IsSkeletonNode(FbxNode* node)
     return (attr && attr->GetAttributeType() == FbxNodeAttribute::eSkeleton);
 }
 
+static FbxAMatrix MakeRotationX(double deg)
+{
+    FbxAMatrix m;
+    m.SetIdentity();
+    m.SetR(FbxVector4(deg, 0.0, 0.0, 0.0));
+    return m;
+}
+
+static FbxAMatrix MakeRotationY(double deg)
+{
+    FbxAMatrix m;
+    m.SetIdentity();
+    m.SetR(FbxVector4(0.0, deg, 0.0, 0.0));
+    return m;
+}
+
+static FbxAMatrix MakeRotationZ(double deg)
+{
+    FbxAMatrix m;
+    m.SetIdentity();
+    m.SetR(FbxVector4(0.0, 0.0, deg, 0.0));
+    return m;
+}
+
+static FbxAMatrix BuildExportRotationMatrix()
+{
+    const FbxAMatrix rx = MakeRotationX(EXPORT_ROT_X_DEG);
+    const FbxAMatrix ry = MakeRotationY(EXPORT_ROT_Y_DEG);
+    const FbxAMatrix rz = MakeRotationZ(EXPORT_ROT_Z_DEG);
+
+    // 적용 순서: X -> Y -> Z
+    return rz * ry * rx;
+}
+
+static bool HasSkeletonAncestor(FbxNode* node)
+{
+    if (!node) return false;
+
+    for (FbxNode* p = node->GetParent(); p; p = p->GetParent())
+    {
+        if (IsSkeletonNode(p))
+            return true;
+    }
+    return false;
+}
+
+static bool IsExportRootSkeletonNode(FbxNode* node)
+{
+    return IsSkeletonNode(node) && !HasSkeletonAncestor(node);
+}
+
 // ======================================================================
 // FBX 키 타임 수집: node의 T/R/S 커브에서 모든 키 시간을 outTimes에 넣는다
 // ======================================================================
@@ -115,6 +170,8 @@ static void TraverseAndExtractTracks(
     if (!node) return;
 
     const bool isSkeleton = IsSkeletonNode(node);
+    const bool isExportRootBone = IsExportRootSkeletonNode(node);
+    const FbxAMatrix exportRot = BuildExportRotationMatrix();
 
     // 자식은 항상 재귀
     auto TraverseChildren = [&]()
@@ -175,6 +232,10 @@ static void TraverseAndExtractTracks(
 
             // 로컬 TRS (DirectX + meter 변환 이후 값)
             FbxAMatrix fbxLocal = node->EvaluateLocalTransform(t);
+
+            // export 회전은 루트 본 로컬에만 적용
+            if (isExportRootBone)
+                fbxLocal = exportRot * fbxLocal;
 
             FbxVector4     T = fbxLocal.GetT();
             FbxQuaternion  R = fbxLocal.GetQ();
