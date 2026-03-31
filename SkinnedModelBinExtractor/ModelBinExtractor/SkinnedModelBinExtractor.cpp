@@ -19,12 +19,46 @@
 using namespace std;
 
 static constexpr double EXPORT_SCALE_D = 0.01;
-static constexpr float  EXPORT_SCALE_F = 0.01f; //왜인지 모르겠는데 기본 0.01배 해야 맞음.
+static constexpr float  EXPORT_SCALE_F = 0.01f;
 static constexpr bool MIRROR_X_EXPORT = true;
 
-static constexpr double EXPORT_ROT_X_DEG = 0.0;
+static constexpr double EXPORT_ROT_X_DEG = -90.0;
 static constexpr double EXPORT_ROT_Y_DEG = 0.0;
 static constexpr double EXPORT_ROT_Z_DEG = 0.0;
+
+static FbxAMatrix MakeRotateX(double deg)
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(deg, 0.0, 0.0, 0.0));
+    return R;
+}
+
+static FbxAMatrix MakeRotateY(double deg)
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(0.0, deg, 0.0, 0.0));
+    return R;
+}
+
+static FbxAMatrix MakeRotateZ(double deg)
+{
+    FbxAMatrix R;
+    R.SetIdentity();
+    R.SetR(FbxVector4(0.0, 0.0, deg, 0.0));
+    return R;
+}
+
+static FbxAMatrix BuildExportRotation()
+{
+    const FbxAMatrix Rx = MakeRotateX(EXPORT_ROT_X_DEG);
+    const FbxAMatrix Ry = MakeRotateY(EXPORT_ROT_Y_DEG);
+    const FbxAMatrix Rz = MakeRotateZ(EXPORT_ROT_Z_DEG);
+
+    // 적용 순서: X -> Y -> Z
+    return Rz * Ry * Rx;
+}
 
 #define DEBUGLOG 1
 
@@ -81,6 +115,7 @@ struct Material
     MaterialTexTransform emissiveTransform;
     MaterialTexTransform specularTransform;
 };
+
 struct SubMesh {
     string meshName;
     uint32_t materialIndex;   // g_Materials 인덱스
@@ -127,40 +162,6 @@ static std::string SafeStemFromFbxFileName(const char* fn)
     }
 }
 
-static FbxAMatrix MakeRotationX(double deg)
-{
-    FbxAMatrix m;
-    m.SetIdentity();
-    m.SetR(FbxVector4(deg, 0.0, 0.0, 0.0));
-    return m;
-}
-
-static FbxAMatrix MakeRotationY(double deg)
-{
-    FbxAMatrix m;
-    m.SetIdentity();
-    m.SetR(FbxVector4(0.0, deg, 0.0, 0.0));
-    return m;
-}
-
-static FbxAMatrix MakeRotationZ(double deg)
-{
-    FbxAMatrix m;
-    m.SetIdentity();
-    m.SetR(FbxVector4(0.0, 0.0, deg, 0.0));
-    return m;
-}
-
-static FbxAMatrix BuildExportRotationMatrix()
-{
-    const FbxAMatrix rx = MakeRotationX(EXPORT_ROT_X_DEG);
-    const FbxAMatrix ry = MakeRotationY(EXPORT_ROT_Y_DEG);
-    const FbxAMatrix rz = MakeRotationZ(EXPORT_ROT_Z_DEG);
-
-    // 적용 순서: X -> Y -> Z
-    return rz * ry * rx;
-}
-
 // ==========================================================
 // 파일 출력 스트림 (전역)
 // ==========================================================
@@ -190,6 +191,7 @@ static void WriteStringUtf8(const std::string& s)
     if (len > 0)
         WriteRaw(s.data(), len);
 }
+
 static void WriteMaterialTexTransform(const MaterialTexTransform& t)
 {
     WriteFloatArray(t.scale, 2);
@@ -288,14 +290,6 @@ static void WriteSubMeshSection()
 // ==========================================================
 static bool SaveModelBin(const std::string& filename)
 {
-#if DEBUGLOG
-    DLOGLN("\n==========================================================");
-    DLOG("[SaveModelBin] filename = "); DLOGLN(filename);
-    DLOG("  boneCount     = "); DLOGLN((uint32_t)g_Bones.size());
-    DLOG("  materialCount = "); DLOGLN((uint32_t)g_Materials.size());
-    DLOG("  subMeshCount  = "); DLOGLN((uint32_t)g_SubMeshes.size());
-#endif
-
     g_out.open(filename, ios::binary);
     if (!g_out.is_open()) return false;
 
@@ -649,7 +643,6 @@ static int GetPolygonMaterialSlot(FbxNode* node, FbxMesh* mesh, int polygonIndex
 
     return localMaterialSlot;
 }
-
 static void ComputeTangentForTri(Vertex& a, Vertex& b, Vertex& c)
 {
     // p, uv
@@ -854,288 +847,6 @@ static const char* SafeName(FbxNode* n)
 
 static int Bool01(bool v) { return v ? 1 : 0; }
 
-// ==========================================================
-// DEBUG DUMP HELPERS
-// ==========================================================
-static void DumpMatrix4x4RowMajor(const char* tag, const float m[16])
-{
-    DLOGLN(tag);
-    for (int r = 0; r < 4; ++r)
-    {
-        DLOG("    [ ");
-        for (int c = 0; c < 4; ++c)
-        {
-            DLOG(m[r * 4 + c]);
-            if (c < 3) DLOG(", ");
-        }
-        DLOGLN(" ]");
-    }
-}
-
-static void DumpBoneSummary()
-{
-    DLOGLN("\n==========================================================");
-    DLOGLN("[Bone Summary]");
-    DLOG("BoneCount = "); DLOGLN((int)g_Bones.size());
-
-    for (int i = 0; i < (int)g_Bones.size(); ++i)
-    {
-        const Bone& b = g_Bones[i];
-        DLOG("--------------------------------------------------\n");
-        DLOG("[Bone "); DLOG(i); DLOG("] ");
-        DLOG("name=\""); DLOG(b.name); DLOG("\" ");
-        DLOG("parentIndex="); DLOGLN(b.parentIndex);
-
-        DumpMatrix4x4RowMajor("  bindLocal:", b.bindLocal);
-        DumpMatrix4x4RowMajor("  offsetMatrix:", b.offsetMatrix);
-    }
-}
-
-static void DumpVertexSample(const Vertex& v, int idx)
-{
-    DLOG("    [Vertex "); DLOG(idx); DLOGLN("]");
-    DLOG("      pos     = (");
-    DLOG(v.position[0]); DLOG(", ");
-    DLOG(v.position[1]); DLOG(", ");
-    DLOG(v.position[2]); DLOGLN(")");
-
-    DLOG("      normal  = (");
-    DLOG(v.normal[0]); DLOG(", ");
-    DLOG(v.normal[1]); DLOG(", ");
-    DLOG(v.normal[2]); DLOGLN(")");
-
-    DLOG("      uv      = (");
-    DLOG(v.uv[0]); DLOG(", ");
-    DLOG(v.uv[1]); DLOGLN(")");
-
-    DLOG("      tangent = (");
-    DLOG(v.tangent[0]); DLOG(", ");
-    DLOG(v.tangent[1]); DLOG(", ");
-    DLOG(v.tangent[2]); DLOG(", ");
-    DLOG(v.tangent[3]); DLOGLN(")");
-
-    DLOG("      bones   = [");
-    DLOG(v.boneIndices[0]); DLOG(", ");
-    DLOG(v.boneIndices[1]); DLOG(", ");
-    DLOG(v.boneIndices[2]); DLOG(", ");
-    DLOG(v.boneIndices[3]); DLOGLN("]");
-
-    DLOG("      weights = [");
-    DLOG(v.boneWeights[0]); DLOG(", ");
-    DLOG(v.boneWeights[1]); DLOG(", ");
-    DLOG(v.boneWeights[2]); DLOG(", ");
-    DLOG(v.boneWeights[3]); DLOGLN("]");
-}
-
-static void DumpSubMeshSummary()
-{
-    DLOGLN("\n==========================================================");
-    DLOGLN("[SubMesh Summary]");
-    DLOG("SubMeshCount = "); DLOGLN((int)g_SubMeshes.size());
-
-    for (int smi = 0; smi < (int)g_SubMeshes.size(); ++smi)
-    {
-        const SubMesh& sm = g_SubMeshes[smi];
-
-        DLOG("--------------------------------------------------\n");
-        DLOG("[SubMesh "); DLOG(smi); DLOG("] ");
-        DLOG("name=\""); DLOG(sm.meshName); DLOG("\" ");
-        DLOG("materialIndex="); DLOG(sm.materialIndex);
-
-        if (sm.materialIndex < g_Materials.size())
-        {
-            DLOG(" materialName=\"");
-            DLOG(g_Materials[sm.materialIndex].name);
-            DLOG("\"");
-        }
-        DLOGLN("");
-
-        DLOG("  vertexCount = "); DLOGLN((uint32_t)sm.vertices.size());
-        DLOG("  indexCount  = "); DLOGLN((uint32_t)sm.indices.size());
-
-        if (!sm.vertices.empty())
-        {
-            float minP[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
-            float maxP[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-
-            int invalidBoneIndexCount = 0;
-            int zeroWeightVertexCount = 0;
-            int badWeightSumCount = 0;
-
-            float minWeightSum = FLT_MAX;
-            float maxWeightSum = -FLT_MAX;
-
-            for (size_t i = 0; i < sm.vertices.size(); ++i)
-            {
-                const Vertex& v = sm.vertices[i];
-
-                for (int k = 0; k < 3; ++k)
-                {
-                    minP[k] = std::min(minP[k], v.position[k]);
-                    maxP[k] = std::max(maxP[k], v.position[k]);
-                }
-
-                float sumW =
-                    v.boneWeights[0] +
-                    v.boneWeights[1] +
-                    v.boneWeights[2] +
-                    v.boneWeights[3];
-
-                minWeightSum = std::min(minWeightSum, sumW);
-                maxWeightSum = std::max(maxWeightSum, sumW);
-
-                if (sumW < 1e-6f)
-                    zeroWeightVertexCount++;
-
-                if (fabsf(sumW - 1.0f) > 0.02f && sumW > 1e-6f)
-                    badWeightSumCount++;
-
-                for (int j = 0; j < 4; ++j)
-                {
-                    if (v.boneWeights[j] > 0.0f)
-                    {
-                        if (v.boneIndices[j] >= g_Bones.size())
-                            invalidBoneIndexCount++;
-                    }
-                }
-            }
-
-            DLOG("  AABB min    = (");
-            DLOG(minP[0]); DLOG(", ");
-            DLOG(minP[1]); DLOG(", ");
-            DLOG(minP[2]); DLOGLN(")");
-
-            DLOG("  AABB max    = (");
-            DLOG(maxP[0]); DLOG(", ");
-            DLOG(maxP[1]); DLOG(", ");
-            DLOG(maxP[2]); DLOGLN(")");
-
-            DLOG("  weightSumMin = "); DLOGLN(minWeightSum);
-            DLOG("  weightSumMax = "); DLOGLN(maxWeightSum);
-            DLOG("  zeroWeightVertexCount = "); DLOGLN(zeroWeightVertexCount);
-            DLOG("  badWeightSumCount     = "); DLOGLN(badWeightSumCount);
-            DLOG("  invalidBoneIndexRefs  = "); DLOGLN(invalidBoneIndexCount);
-
-            int sampleCount = (int)std::min<size_t>(sm.vertices.size(), 5);
-            DLOG("  vertexSamples = "); DLOGLN(sampleCount);
-            for (int i = 0; i < sampleCount; ++i)
-                DumpVertexSample(sm.vertices[i], i);
-        }
-
-        if (!sm.indices.empty())
-        {
-            uint32_t maxIdx = 0;
-            int outOfRangeIndexCount = 0;
-
-            for (uint32_t idx : sm.indices)
-            {
-                if (idx > maxIdx) maxIdx = idx;
-                if (idx >= sm.vertices.size())
-                    outOfRangeIndexCount++;
-            }
-
-            DLOG("  maxIndex = "); DLOGLN(maxIdx);
-            DLOG("  outOfRangeIndexCount = "); DLOGLN(outOfRangeIndexCount);
-
-            int triSampleCount = (int)std::min<size_t>(sm.indices.size() / 3, 5);
-            DLOG("  triangleSamples = "); DLOGLN(triSampleCount);
-            for (int t = 0; t < triSampleCount; ++t)
-            {
-                uint32_t i0 = sm.indices[t * 3 + 0];
-                uint32_t i1 = sm.indices[t * 3 + 1];
-                uint32_t i2 = sm.indices[t * 3 + 2];
-
-                DLOG("    tri "); DLOG(t); DLOG(" = [");
-                DLOG(i0); DLOG(", ");
-                DLOG(i1); DLOG(", ");
-                DLOG(i2); DLOGLN("]");
-            }
-        }
-    }
-}
-
-static void DumpMaterialSummary()
-{
-    DLOGLN("\n==========================================================");
-    DLOGLN("[Material Summary]");
-    DLOG("MaterialCount = "); DLOGLN((int)g_Materials.size());
-
-    for (int i = 0; i < (int)g_Materials.size(); ++i)
-    {
-        const Material& m = g_Materials[i];
-
-        DLOG("[Material "); DLOG(i); DLOG("] ");
-        DLOG("name=\""); DLOG(m.name); DLOGLN("\"");
-
-        DLOG("  diffuseTex=\""); DLOG(m.diffuseTextureName); DLOGLN("\"");
-        DLOG("  normalTex=\""); DLOG(m.normalTextureName); DLOGLN("\"");
-        DLOG("  emissiveTex=\""); DLOG(m.emissiveTextureName); DLOGLN("\"");
-        DLOG("  specularTex=\""); DLOG(m.specularTextureName); DLOGLN("\"");
-
-        DLOG("  diffuseColor = (");
-        DLOG(m.diffuseColor[0]); DLOG(", ");
-        DLOG(m.diffuseColor[1]); DLOG(", ");
-        DLOG(m.diffuseColor[2]); DLOG(", ");
-        DLOG(m.diffuseColor[3]); DLOGLN(")");
-
-        DLOG("  emissiveColor = (");
-        DLOG(m.emissiveColor[0]); DLOG(", ");
-        DLOG(m.emissiveColor[1]); DLOG(", ");
-        DLOG(m.emissiveColor[2]); DLOG(", ");
-        DLOG(m.emissiveColor[3]); DLOGLN(")");
-
-        DLOG("  specularColor = (");
-        DLOG(m.specularColor[0]); DLOG(", ");
-        DLOG(m.specularColor[1]); DLOG(", ");
-        DLOG(m.specularColor[2]); DLOG(", ");
-        DLOG(m.specularColor[3]); DLOGLN(")");
-
-        DLOG("  diffuseTransform scale=(");
-        DLOG(m.diffuseTransform.scale[0]); DLOG(", ");
-        DLOG(m.diffuseTransform.scale[1]); DLOG(") offset=(");
-        DLOG(m.diffuseTransform.offset[0]); DLOG(", ");
-        DLOG(m.diffuseTransform.offset[1]); DLOG(") wrap=(");
-        DLOG(m.diffuseTransform.wrapMode[0]); DLOG(", ");
-        DLOG(m.diffuseTransform.wrapMode[1]); DLOGLN(")");
-
-        DLOG("  normalTransform scale=(");
-        DLOG(m.normalTransform.scale[0]); DLOG(", ");
-        DLOG(m.normalTransform.scale[1]); DLOG(") offset=(");
-        DLOG(m.normalTransform.offset[0]); DLOG(", ");
-        DLOG(m.normalTransform.offset[1]); DLOG(") wrap=(");
-        DLOG(m.normalTransform.wrapMode[0]); DLOG(", ");
-        DLOG(m.normalTransform.wrapMode[1]); DLOGLN(")");
-
-        DLOG("  emissiveTransform scale=(");
-        DLOG(m.emissiveTransform.scale[0]); DLOG(", ");
-        DLOG(m.emissiveTransform.scale[1]); DLOG(") offset=(");
-        DLOG(m.emissiveTransform.offset[0]); DLOG(", ");
-        DLOG(m.emissiveTransform.offset[1]); DLOG(") wrap=(");
-        DLOG(m.emissiveTransform.wrapMode[0]); DLOG(", ");
-        DLOG(m.emissiveTransform.wrapMode[1]); DLOGLN(")");
-
-        DLOG("  specularTransform scale=(");
-        DLOG(m.specularTransform.scale[0]); DLOG(", ");
-        DLOG(m.specularTransform.scale[1]); DLOG(") offset=(");
-        DLOG(m.specularTransform.offset[0]); DLOG(", ");
-        DLOG(m.specularTransform.offset[1]); DLOG(") wrap=(");
-        DLOG(m.specularTransform.wrapMode[0]); DLOG(", ");
-        DLOG(m.specularTransform.wrapMode[1]); DLOGLN(")");
-    }
-}
-
-static void DumpExportSummary()
-{
-    DLOGLN("\n==========================================================");
-    DLOGLN("[Export Summary]");
-    DLOG("Bones     = "); DLOGLN((int)g_Bones.size());
-    DLOG("Materials = "); DLOGLN((int)g_Materials.size());
-    DLOG("SubMeshes = "); DLOGLN((int)g_SubMeshes.size());
-
-    DumpMaterialSummary();
-    DumpBoneSummary();
-    DumpSubMeshSummary();
-}
 
 // ==========================================================
 // 스킨 전용 FBX 파싱
@@ -1231,7 +942,6 @@ static void ExtractFromFBX(FbxScene* scene)
     }
 
     FbxNode* baseNode = meshRefs[baseMeshIndex].node;
-    const FbxAMatrix exportRot = BuildExportRotationMatrix();
 
     // 6) boneGlobalBind 계산 (base mesh 기준 좌표)
     vector<FbxAMatrix> boneGlobalBind(boneCount);
@@ -1248,6 +958,9 @@ static void ExtractFromFBX(FbxScene* scene)
     S.SetRow(1, FbxVector4(0, 1, 0, 0));
     S.SetRow(2, FbxVector4(0, 0, 1, 0));
     S.SetRow(3, FbxVector4(0, 0, 0, 1));
+
+    FbxAMatrix R = BuildExportRotation();
+    FbxAMatrix RInv = R.Inverse();
 
     for (int i = 0; i < boneCount; ++i)
     {
@@ -1271,11 +984,10 @@ static void ExtractFromFBX(FbxScene* scene)
         t[2] *= EXPORT_SCALE_D;
         boneInMesh.SetT(t);
 
+        boneInMesh = R * boneInMesh * RInv;
+
         if (MIRROR_X_EXPORT)
             boneInMesh = S * boneInMesh * S;
-
-        // export 회전 적용
-        boneInMesh = exportRot * boneInMesh;
 
         boneGlobalBind[i] = boneInMesh;
         boneHasBind[i] = true;
@@ -1348,7 +1060,6 @@ static void ExtractFromFBX(FbxScene* scene)
             for (int i = 0; i < node->GetChildCount(); ++i)
                 CollectMaterials(node->GetChild(i));
         };
-    
     CollectMaterials(scene->GetRootNode());
 #if DEBUGLOG
     DLOGLN("\n[Material List]");
@@ -1420,7 +1131,7 @@ static void ExtractFromFBX(FbxScene* scene)
         geo.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
         geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
 
-        // 정점은 base mesh 기준 공간으로 통일
+        // 정점은 "base mesh 기준 공간"으로 통일
         FbxAMatrix toBase = baseInv * meshG * geo;
 
         auto Det3x3Local = [](const FbxAMatrix& m) -> double
@@ -1442,89 +1153,70 @@ static void ExtractFromFBX(FbxScene* scene)
 
         for (int p = 0; p < polyCount; ++p)
         {
-            int order[3] = { 0, 1, 2 };
-
             int localMaterialSlot = GetPolygonMaterialSlot(node, mesh, p);
             if (localMaterialSlot < 0 || localMaterialSlot >= nodeMaterialCount)
                 localMaterialSlot = 0;
-
-            if (flipWinding)
-                std::swap(order[1], order[2]);
 
             SubMesh& sm = splitSubMeshes[localMaterialSlot];
             std::vector<int>& vtxCpIndex = splitVtxCpIndex[localMaterialSlot];
             splitSubMeshUsed[localMaterialSlot] = true;
 
             Vertex triV[3]{};
-            int triCp[3] = { -1, -1, -1 };
+            int triCp[3]{ -1, -1, -1 };
 
             for (int k = 0; k < 3; ++k)
             {
-                int vi = order[k];
-                int cpIdx = mesh->GetPolygonVertex(p, vi);
+                int cpIdx = mesh->GetPolygonVertex(p, k);
                 triCp[k] = cpIdx;
-
-                if (cpIdx < 0 || cpIdx >= cpCount)
-                {
-                    triV[k] = Vertex{};
-                    continue;
-                }
-
-                Vertex v{};
 
                 // position (base 공간으로 변환)
                 FbxVector4 p4 = toBase.MultT(cp[cpIdx]);
+                p4 = R.MultT(p4);
                 if (MIRROR_X_EXPORT) p4[0] = -p4[0];
+                triV[k].position[0] = (float)p4[0] * EXPORT_SCALE_F;
+                triV[k].position[1] = (float)p4[1] * EXPORT_SCALE_F;
+                triV[k].position[2] = (float)p4[2] * EXPORT_SCALE_F;
 
-                // export 회전 적용 (피벗/원점 기준)
-                p4 = exportRot.MultT(p4);
-
-                v.position[0] = (float)p4[0] * EXPORT_SCALE_F;
-                v.position[1] = (float)p4[1] * EXPORT_SCALE_F;
-                v.position[2] = (float)p4[2] * EXPORT_SCALE_F;
-
-                // normal (기존 스키닝 추출기 로직 유지)
+                // normal
                 FbxVector4 nL;
-                mesh->GetPolygonVertexNormal(p, vi, nL);
+                mesh->GetPolygonVertexNormal(p, k, nL);
                 FbxVector4 n4(nL[0], nL[1], nL[2], 0.0);
                 FbxVector4 nW = toBase.MultT(n4);
+                nW = R.MultT(nW);
                 if (MIRROR_X_EXPORT) nW[0] = -nW[0];
 
-                // export 회전 적용
-                nW = exportRot.MultT(nW);
-
                 nW.Normalize();
-                v.normal[0] = (float)nW[0];
-                v.normal[1] = (float)nW[1];
-                v.normal[2] = (float)nW[2];
+                triV[k].normal[0] = (float)nW[0];
+                triV[k].normal[1] = (float)nW[1];
+                triV[k].normal[2] = (float)nW[2];
 
                 // UV
                 if (hasUVSet)
                 {
                     FbxVector2 uv;
                     bool unmapped = false;
-                    if (mesh->GetPolygonVertexUV(p, vi, uvSetName, uv, unmapped))
+                    if (mesh->GetPolygonVertexUV(p, k, uvSetName, uv, unmapped))
                     {
-                        v.uv[0] = (float)uv[0];
-                        v.uv[1] = 1.0f - (float)uv[1];
+                        triV[k].uv[0] = (float)uv[0];
+                        triV[k].uv[1] = 1.0f - (float)uv[1];
                     }
                     else
                     {
-                        v.uv[0] = 0.0f;
-                        v.uv[1] = 0.0f;
+                        triV[k].uv[0] = 0.0f;
+                        triV[k].uv[1] = 0.0f;
                     }
                 }
                 else
                 {
-                    v.uv[0] = 0.0f;
-                    v.uv[1] = 0.0f;
+                    triV[k].uv[0] = 0.0f;
+                    triV[k].uv[1] = 0.0f;
                 }
-
-                triV[k] = v;
             }
 
-            // order가 이미 flip 반영된 상태이므로 그대로 계산
-            ComputeTangentForTri(triV[0], triV[1], triV[2]);
+            if (!flipWinding)
+                ComputeTangentForTri(triV[0], triV[1], triV[2]);
+            else
+                ComputeTangentForTri(triV[0], triV[2], triV[1]);
 
             uint32_t base = (uint32_t)sm.vertices.size();
 
@@ -1536,9 +1228,18 @@ static void ExtractFromFBX(FbxScene* scene)
             vtxCpIndex.push_back(triCp[1]);
             vtxCpIndex.push_back(triCp[2]);
 
-            sm.indices.push_back(base + 0);
-            sm.indices.push_back(base + 1);
-            sm.indices.push_back(base + 2);
+            if (!flipWinding)
+            {
+                sm.indices.push_back(base + 0);
+                sm.indices.push_back(base + 1);
+                sm.indices.push_back(base + 2);
+            }
+            else
+            {
+                sm.indices.push_back(base + 0);
+                sm.indices.push_back(base + 2);
+                sm.indices.push_back(base + 1);
+            }
         }
 
         for (int matSlot = 0; matSlot < nodeMaterialCount; ++matSlot)
@@ -1621,10 +1322,6 @@ int main()
         importer->Destroy();
 
         ExtractFromFBX(scene);
-
-#if DEBUGLOG
-        DumpExportSummary();
-#endif
 
         if (SaveModelBin(binFileName))
             cout << "BIN 생성 완료: " << binFileName << "\n";
