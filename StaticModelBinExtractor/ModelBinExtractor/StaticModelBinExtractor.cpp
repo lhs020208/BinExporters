@@ -78,6 +78,7 @@ struct Material
 
 struct SubMesh {
     string meshName;
+    string authoringPath;
     uint32_t materialIndex;
     vector<Vertex> vertices;
     vector<uint32_t> indices;
@@ -473,6 +474,64 @@ static FbxAMatrix GetGeometry(FbxNode* node)
     geo.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
     return geo;
 }
+
+static int GetSiblingIndex(FbxNode* node)
+{
+    if (!node) return 0;
+
+    FbxNode* parent = node->GetParent();
+    if (!parent) return 0;
+
+    const int childCount = parent->GetChildCount();
+    for (int i = 0; i < childCount; ++i)
+    {
+        if (parent->GetChild(i) == node)
+            return i;
+    }
+
+    return 0;
+}
+
+static std::string JoinPathSegments(const std::vector<std::string>& segments)
+{
+    if (segments.empty()) return "";
+
+    std::string out = segments[0];
+    for (size_t i = 1; i < segments.size(); ++i)
+    {
+        out += "/";
+        out += segments[i];
+    }
+    return out;
+}
+
+static std::string GetNodeRelativeAuthoringPath(FbxScene* scene, FbxNode* node)
+{
+    if (!scene || !node) return "";
+
+    FbxNode* sceneRoot = scene->GetRootNode();
+    if (!sceneRoot) return "";
+
+    FbxNode* topRoot = node;
+    while (topRoot->GetParent() && topRoot->GetParent() != sceneRoot)
+    {
+        topRoot = topRoot->GetParent();
+    }
+
+    std::vector<std::string> segments;
+
+    FbxNode* cur = node;
+    while (cur && cur != topRoot)
+    {
+        const int siblingIndex = GetSiblingIndex(cur);
+        segments.push_back(std::string(cur->GetName()) + "[" + std::to_string(siblingIndex) + "]");
+        cur = cur->GetParent();
+    }
+
+    std::reverse(segments.begin(), segments.end());
+    return JoinPathSegments(segments);
+}
+
 static int GetPolygonMaterialSlot(FbxNode* node, FbxMesh* mesh, int polygonIndex)
 {
     if (!node || !mesh) return 0;
@@ -606,7 +665,7 @@ static void WriteModelHeader()
     char magic[4] = { 'M', 'B', 'I', 'N' };
     WriteRaw(magic, 4);
 
-    uint32_t version = 3;
+    uint32_t version = 4;
     uint32_t flags = 0;
     uint32_t boneCount = 0; // 비스킨 전용
     uint32_t materialCount = (uint32_t)g_Materials.size();
@@ -637,6 +696,7 @@ static void WriteSubMeshSection()
     for (auto& sm : g_SubMeshes)
     {
         WriteStringUtf8(sm.meshName);
+        WriteStringUtf8(sm.authoringPath);
         WriteUInt32(sm.materialIndex);
 
         uint32_t vtxCount = (uint32_t)sm.vertices.size();
@@ -768,6 +828,8 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
         FbxNode* node = mr.node;
         FbxMesh* mesh = mr.mesh;
 
+        const std::string authoredPath = GetNodeRelativeAuthoringPath(scene, node);
+
         const int nodeMaterialCount = std::max(1, node->GetMaterialCount());
 
         std::vector<SubMesh> splitSubMeshes(nodeMaterialCount);
@@ -789,6 +851,7 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
             }
 
             splitSubMeshes[mi].meshName = node->GetName();
+            splitSubMeshes[mi].authoringPath = authoredPath;
             splitSubMeshes[mi].materialIndex = globalMaterialIndex;
         }
 
