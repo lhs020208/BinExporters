@@ -79,7 +79,17 @@ struct Material
 struct SubMesh {
     string meshName;
     string authoringPath;
-    uint32_t materialIndex;
+    uint32_t materialIndex = 0;
+
+    uint32_t hasExplicitLocalOOBB = 0;
+    float explicitLocalOOBBMatrix[16] =
+    {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+
     vector<Vertex> vertices;
     vector<uint32_t> indices;
 };
@@ -688,6 +698,54 @@ static void ComputeTangentForTri(Vertex& a, Vertex& b, Vertex& c)
     FixOne(a); FixOne(b); FixOne(c);
 }
 
+static void ExpandFbxMinMax(FbxVector4& minPt, FbxVector4& maxPt, const FbxVector4& p)
+{
+    minPt[0] = std::min(minPt[0], p[0]);
+    minPt[1] = std::min(minPt[1], p[1]);
+    minPt[2] = std::min(minPt[2], p[2]);
+
+    maxPt[0] = std::max(maxPt[0], p[0]);
+    maxPt[1] = std::max(maxPt[1], p[1]);
+    maxPt[2] = std::max(maxPt[2], p[2]);
+}
+
+static void FillExplicitLocalOOBBMatrix(
+    SubMesh& sm,
+    const FbxAMatrix& meshLocalToBakedSpace,
+    const FbxVector4& localMin,
+    const FbxVector4& localMax)
+{
+    const FbxVector4 center(
+        (localMin[0] + localMax[0]) * 0.5,
+        (localMin[1] + localMax[1]) * 0.5,
+        (localMin[2] + localMax[2]) * 0.5,
+        0.0
+    );
+
+    const FbxVector4 size(
+        (localMax[0] - localMin[0]),
+        (localMax[1] - localMin[1]),
+        (localMax[2] - localMin[2]),
+        0.0
+    );
+
+    FbxAMatrix unitToLocalAABB;
+    unitToLocalAABB.SetIdentity();
+    unitToLocalAABB.SetT(center);
+    unitToLocalAABB.SetS(size);
+
+    const FbxAMatrix unitToBaked = meshLocalToBakedSpace * unitToLocalAABB;
+
+    sm.hasExplicitLocalOOBB = 1;
+
+    for (int r = 0; r < 4; ++r)
+    {
+        for (int c = 0; c < 4; ++c)
+        {
+            sm.explicitLocalOOBBMatrix[r * 4 + c] = (float)unitToBaked[r][c];
+        }
+    }
+}
 
 // ==========================================================
 // Material 섹션
@@ -723,7 +781,7 @@ static void WriteModelHeader()
     char magic[4] = { 'M', 'B', 'I', 'N' };
     WriteRaw(magic, 4);
 
-    uint32_t version = 4;
+    uint32_t version = 5;
     uint32_t flags = 0;
     uint32_t boneCount = 0; // 비스킨 전용
     uint32_t materialCount = (uint32_t)g_Materials.size();
@@ -756,6 +814,8 @@ static void WriteSubMeshSection()
         WriteStringUtf8(sm.meshName);
         WriteStringUtf8(sm.authoringPath);
         WriteUInt32(sm.materialIndex);
+        WriteUInt32(sm.hasExplicitLocalOOBB);
+        WriteFloatArray(sm.explicitLocalOOBBMatrix, 16);
 
         uint32_t vtxCount = (uint32_t)sm.vertices.size();
         uint32_t idxCount = (uint32_t)sm.indices.size();
@@ -921,6 +981,10 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
         std::vector<SubMesh> splitSubMeshes(nodeMaterialCount);
         std::vector<bool> splitSubMeshUsed(nodeMaterialCount, false);
 
+        std::vector<FbxVector4> splitLocalMin(nodeMaterialCount, FbxVector4(DBL_MAX, DBL_MAX, DBL_MAX, 0.0));
+        std::vector<FbxVector4> splitLocalMax(nodeMaterialCount, FbxVector4(-DBL_MAX, -DBL_MAX, -DBL_MAX, 0.0));
+        std::vector<bool> splitLocalBoundsValid(nodeMaterialCount, false);
+
         for (int mi = 0; mi < nodeMaterialCount; ++mi)
         {
             uint32_t globalMaterialIndex = 0;
@@ -993,6 +1057,7 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
             if (flip) std::swap(order[1], order[2]);
 
             Vertex triV[3]{};
+            FbxVector4 triLocalPos[3];
 
             for (int k = 0; k < 3; ++k)
             {
@@ -1005,6 +1070,7 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
 
                 // position bake
                 FbxVector4 posL = cp[cpIdx];
+                triLocalPos[k] = posL;
                 FbxVector4 posW = xform.MultT(posL);
                 v.position[0] = (float)posW[0] * FINAL_SCALE_F;
                 v.position[1] = (float)posW[1] * FINAL_SCALE_F;
@@ -1041,6 +1107,11 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
                 triV[k] = v;
             }
 
+            for (int k = 0; k < 3; ++k)
+            {
+                ExpandFbxMinMax(splitLocalMin[localMaterialSlot], splitLocalMax[localMaterialSlot], triLocalPos[k]);
+                splitLocalBoundsValid[localMaterialSlot] = true;
+            }
             // tangent 계산(현재 order가 이미 flip 반영됨)
             ComputeTangentForTri(triV[0], triV[1], triV[2]);
 
@@ -1061,6 +1132,16 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
             SubMesh& sm = splitSubMeshes[mi];
             if (!splitSubMeshUsed[mi]) continue;
             if (sm.vertices.empty()) continue;
+
+            if (splitLocalBoundsValid[mi])
+            {
+                FillExplicitLocalOOBBMatrix(
+                    sm,
+                    xform,
+                    splitLocalMin[mi],
+                    splitLocalMax[mi]
+                );
+            }
 
 #if DEBUGLOG
             DLOG("[SubMesh] mesh=\""); DLOG(sm.meshName); DLOG("\" ");
