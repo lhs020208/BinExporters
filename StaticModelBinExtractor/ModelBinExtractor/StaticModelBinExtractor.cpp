@@ -564,6 +564,64 @@ static int GetPolygonMaterialSlot(FbxNode* node, FbxMesh* mesh, int polygonIndex
 
     return localMaterialSlot;
 }
+
+static std::string NormalizeMaterialLikeName(const std::string& text)
+{
+    std::string out = text;
+
+    std::transform(out.begin(), out.end(), out.begin(),
+        [](unsigned char c) { return (char)std::tolower(c); });
+
+    const std::string instanceTag = "(instance)";
+    size_t pos = std::string::npos;
+    while ((pos = out.find(instanceTag)) != std::string::npos)
+        out.erase(pos, instanceTag.size());
+
+    out.erase(
+        std::remove_if(out.begin(), out.end(),
+            [](unsigned char c)
+            {
+                return c == ' ' || c == '-' || c == '_';
+            }),
+        out.end()
+    );
+
+    return out;
+}
+
+static bool StartsWithCubePrefix(const char* nodeName)
+{
+    if (!nodeName) return false;
+
+    const std::string s(nodeName);
+    return (s.rfind("Cube", 0) == 0);
+}
+
+static bool IsDefaultLikeMaterial(FbxSurfaceMaterial* mat)
+{
+    if (!mat) return false;
+    return NormalizeMaterialLikeName(mat->GetName()) == "defaultmaterial";
+}
+
+static bool ShouldSkipColliderHelperNode(FbxNode* node)
+{
+    if (!node) return false;
+    if (!node->GetMesh()) return false;
+    if (!StartsWithCubePrefix(node->GetName())) return false;
+
+    const int matCount = node->GetMaterialCount();
+    if (matCount <= 0) return false;
+
+    for (int i = 0; i < matCount; ++i)
+    {
+        FbxSurfaceMaterial* mat = node->GetMaterial(i);
+        if (!IsDefaultLikeMaterial(mat))
+            return false;
+    }
+
+    return true;
+}
+
 static void ComputeTangentForTri(Vertex& a, Vertex& b, Vertex& c)
 {
     float x1 = b.position[0] - a.position[0];
@@ -760,27 +818,39 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
         {
             if (!node) return;
 
-            int matCount = node->GetMaterialCount();
-            for (int i = 0; i < matCount; ++i)
+            const bool skipThisNode = ShouldSkipColliderHelperNode(node);
+
+            if (!skipThisNode)
             {
-                FbxSurfaceMaterial* mat = node->GetMaterial(i);
-                if (!mat) continue;
+                int matCount = node->GetMaterialCount();
+                for (int i = 0; i < matCount; ++i)
+                {
+                    FbxSurfaceMaterial* mat = node->GetMaterial(i);
+                    if (!mat) continue;
 
-                string matName = mat->GetName();
-                if (g_MaterialNameToIndex.count(matName)) continue;
+                    string matName = mat->GetName();
+                    if (g_MaterialNameToIndex.count(matName)) continue;
 
-                Material m{};
-                m.name = matName;
-                ExtractMaterialAttributes(mat, m);
+                    Material m{};
+                    m.name = matName;
+                    ExtractMaterialAttributes(mat, m);
 
 #if DEBUGLOG
-                DumpMaterialDebug(mat);
+                    DumpMaterialDebug(mat);
 #endif
 
-                uint32_t idx = (uint32_t)g_Materials.size();
-                g_Materials.push_back(m);
-                g_MaterialNameToIndex[matName] = idx;
+                    uint32_t idx = (uint32_t)g_Materials.size();
+                    g_Materials.push_back(m);
+                    g_MaterialNameToIndex[matName] = idx;
+                }
             }
+#if DEBUGLOG
+            else
+            {
+                DLOG("[SKIP MATERIAL NODE] ");
+                DLOGLN(node->GetName());
+            }
+#endif
 
             for (int i = 0; i < node->GetChildCount(); ++i)
                 CollectMaterials(node->GetChild(i));
@@ -809,11 +879,26 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
         {
             if (!n) return;
 
-            if (auto* m = n->GetMesh())
+            const bool skipThisNode = ShouldSkipColliderHelperNode(n);
+
+            if (!skipThisNode)
             {
-                bool hasSkin = (m->GetDeformerCount(FbxDeformer::eSkin) > 0);
-                meshRefs.push_back({ n, m, hasSkin });
+                if (auto* m = n->GetMesh())
+                {
+                    bool hasSkin = (m->GetDeformerCount(FbxDeformer::eSkin) > 0);
+                    meshRefs.push_back({ n, m, hasSkin });
+                }
             }
+#if DEBUGLOG
+            else
+            {
+                if (n->GetMesh())
+                {
+                    DLOG("[SKIP COLLIDER HELPER MESH] ");
+                    DLOGLN(n->GetName());
+                }
+            }
+#endif
 
             for (int i = 0; i < n->GetChildCount(); ++i)
                 dfs(n->GetChild(i));
@@ -824,6 +909,7 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
     {
         if (!mr.node || !mr.mesh) continue;
         if (mr.hasSkin) continue; // ★ 스킨 메시 제거: 비스킨 전용
+        if (ShouldSkipColliderHelperNode(mr.node)) continue;
 
         FbxNode* node = mr.node;
         FbxMesh* mesh = mr.mesh;
