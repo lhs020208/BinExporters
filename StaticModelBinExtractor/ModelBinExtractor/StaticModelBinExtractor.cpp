@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <system_error>
 #include <cmath>
+#include <set>
 
 #include <fbxsdk.h>
 using namespace std;
@@ -31,8 +32,8 @@ static constexpr float FINAL_SCALE_F = 1.0f; // ConvertScene(m) 사용 시 1.0 권장
 #define DEBUGLOG 1
 
 #if DEBUGLOG
-#define DLOG(x) do { std::cout << x; } while(0)
-#define DLOGLN(x) do { std::cout << x << "\n"; } while(0)
+#define DLOG(x) do { std::cout << (x); } while(0)
+#define DLOGLN(x) do { std::cout << (x) << "\n"; } while(0)
 #else
 #define DLOG(x) do {} while(0)
 #define DLOGLN(x) do {} while(0)
@@ -218,6 +219,99 @@ static const char* MaterialClassToString(FbxSurfaceMaterial* mat)
     if (FbxCast<FbxSurfacePhong>(mat))   return "Phong";
     if (FbxCast<FbxSurfaceLambert>(mat)) return "Lambert";
     return "Other";
+}
+
+static const char* MappingModeToString(FbxGeometryElement::EMappingMode mode)
+{
+    switch (mode)
+    {
+    case FbxGeometryElement::eNone: return "eNone";
+    case FbxGeometryElement::eByControlPoint: return "eByControlPoint";
+    case FbxGeometryElement::eByPolygonVertex: return "eByPolygonVertex";
+    case FbxGeometryElement::eByPolygon: return "eByPolygon";
+    case FbxGeometryElement::eByEdge: return "eByEdge";
+    case FbxGeometryElement::eAllSame: return "eAllSame";
+    default: return "Unknown";
+    }
+}
+
+static const char* ReferenceModeToString(FbxGeometryElement::EReferenceMode mode)
+{
+    switch (mode)
+    {
+    case FbxGeometryElement::eDirect: return "eDirect";
+    case FbxGeometryElement::eIndex: return "eIndex";
+    case FbxGeometryElement::eIndexToDirect: return "eIndexToDirect";
+    default: return "Unknown";
+    }
+}
+
+static bool StartsWithCubePrefix(const char* nodeName);
+static bool IsDefaultLikeMaterial(FbxSurfaceMaterial* mat);
+
+static void DumpColliderHelperDecision(FbxNode* node, FbxMesh* mesh)
+{
+    if (!node || !mesh) return;
+
+    DLOGLN("\n================ COLLIDER HELPER CHECK ================");
+    DLOG("NodeName=\""); DLOG(node->GetName()); DLOGLN("\"");
+
+    DLOG("StartsWithCubePrefix="); DLOGLN(StartsWithCubePrefix(node->GetName()) ? 1 : 0);
+
+    const int matCount = node->GetMaterialCount();
+    DLOG("NodeMaterialCount="); DLOGLN(matCount);
+
+    for (int i = 0; i < matCount; ++i)
+    {
+        FbxSurfaceMaterial* mat = node->GetMaterial(i);
+
+        DLOG("  NodeMaterial["); DLOG(i); DLOG("] ");
+        if (!mat)
+        {
+            DLOGLN("null");
+            continue;
+        }
+
+        DLOG("name=\""); DLOG(mat->GetName()); DLOG("\" ");
+        DLOG("class=\""); DLOG(MaterialClassToString(mat)); DLOG("\" ");
+        DLOG("isDefaultLike="); DLOGLN(IsDefaultLikeMaterial(mat) ? 1 : 0);
+    }
+
+    FbxGeometryElementMaterial* matElem = mesh->GetElementMaterial();
+    if (!matElem)
+    {
+        DLOGLN("MeshMaterialElement=null");
+    }
+    else
+    {
+        DLOG("MeshMaterialElement.Mapping="); DLOGLN(MappingModeToString(matElem->GetMappingMode()));
+        DLOG("MeshMaterialElement.Reference="); DLOGLN(ReferenceModeToString(matElem->GetReferenceMode()));
+        DLOG("MeshMaterialIndexCount="); DLOGLN(matElem->GetIndexArray().GetCount());
+
+        std::set<int> uniqueSlots;
+        const int idxCount = matElem->GetIndexArray().GetCount();
+        for (int i = 0; i < idxCount; ++i)
+            uniqueSlots.insert(matElem->GetIndexArray().GetAt(i));
+
+        DLOG("UniquePolygonMaterialSlots=");
+        if (uniqueSlots.empty())
+        {
+            DLOGLN("(empty)");
+        }
+        else
+        {
+            bool first = true;
+            for (int slot : uniqueSlots)
+            {
+                if (!first) DLOG(", ");
+                DLOG(slot);
+                first = false;
+            }
+            DLOGLN("");
+        }
+    }
+
+    DLOGLN("======================================================");
 }
 
 static void DumpDouble3Value(const char* label, const FbxDouble3& v)
@@ -613,22 +707,69 @@ static bool IsDefaultLikeMaterial(FbxSurfaceMaterial* mat)
     return NormalizeMaterialLikeName(mat->GetName()) == "defaultmaterial";
 }
 
+static bool HasOnlySlot0MaterialElement(FbxMesh* mesh)
+{
+    if (!mesh) return false;
+
+    FbxGeometryElementMaterial* matElem = mesh->GetElementMaterial();
+    if (!matElem) return true;
+
+    const int idxCount = matElem->GetIndexArray().GetCount();
+    if (idxCount <= 0) return true;
+
+    for (int i = 0; i < idxCount; ++i)
+    {
+        if (matElem->GetIndexArray().GetAt(i) != 0)
+            return false;
+    }
+
+    return true;
+}
+
 static bool ShouldSkipColliderHelperNode(FbxNode* node)
 {
     if (!node) return false;
-    if (!node->GetMesh()) return false;
-    if (!StartsWithCubePrefix(node->GetName())) return false;
+
+    FbxMesh* mesh = node->GetMesh();
+    if (!mesh) return false;
+
+    if (!StartsWithCubePrefix(node->GetName()))
+        return false;
+
+    DumpColliderHelperDecision(node, mesh);
 
     const int matCount = node->GetMaterialCount();
-    if (matCount <= 0) return false;
+
+    // ------------------------------------------------------
+    // 핵심 수정:
+    // Cube prefix인데 node material이 0개여도,
+    // mesh material element가 전부 slot 0만 가리키는 형태면
+    // collider helper로 본다.
+    // ------------------------------------------------------
+    if (matCount <= 0)
+    {
+        if (HasOnlySlot0MaterialElement(mesh))
+        {
+            DLOGLN("[HELPER DECISION] result=SKIP reason=cube-prefix + no node materials + only slot0 material element");
+            return true;
+        }
+
+        DLOGLN("[HELPER DECISION] result=KEEP reason=no node materials but material element is not helper-like");
+        return false;
+    }
 
     for (int i = 0; i < matCount; ++i)
     {
         FbxSurfaceMaterial* mat = node->GetMaterial(i);
         if (!IsDefaultLikeMaterial(mat))
+        {
+            DLOG("[HELPER DECISION] result=KEEP reason=non-default material at slot ");
+            DLOGLN(i);
             return false;
+        }
     }
 
+    DLOGLN("[HELPER DECISION] result=SKIP reason=cube-prefix + all-default-materials");
     return true;
 }
 
@@ -1003,6 +1144,20 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
             splitSubMeshes[mi].meshName = node->GetName();
             splitSubMeshes[mi].authoringPath = authoredPath;
             splitSubMeshes[mi].materialIndex = globalMaterialIndex;
+        
+            if (StartsWithCubePrefix(node->GetName()))
+            {
+                DLOG("[CubeMaterialBind] node=\""); DLOG(node->GetName());
+                DLOG("\" slot="); DLOG(mi);
+                DLOG(" globalMaterialIndex="); DLOG(globalMaterialIndex);
+
+                if (globalMaterialIndex < g_Materials.size())
+                {
+                    DLOG(" materialName=\""); DLOG(g_Materials[globalMaterialIndex].name); DLOG("\"");
+                }
+
+                DLOGLN("");
+            }
         }
 
         // 5) 비스킨: 노드 글로벌 + 지오를 정점에 베이크
@@ -1051,6 +1206,13 @@ static void ExtractFromFBX_StaticOnly(FbxScene* scene)
             int localMaterialSlot = GetPolygonMaterialSlot(node, mesh, p);
             if (localMaterialSlot < 0 || localMaterialSlot >= nodeMaterialCount)
                 localMaterialSlot = 0;
+
+            if (StartsWithCubePrefix(node->GetName()))
+            {
+                DLOG("[CubePolygonMaterial] node=\""); DLOG(node->GetName());
+                DLOG("\" polygon="); DLOG(p);
+                DLOG(" localMaterialSlot="); DLOGLN(localMaterialSlot);
+            }
 
             SubMesh& sm = splitSubMeshes[localMaterialSlot];
             splitSubMeshUsed[localMaterialSlot] = true;
