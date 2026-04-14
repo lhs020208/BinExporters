@@ -105,6 +105,10 @@ static constexpr int kStaticLodCount = 3;
 struct StaticLodBuildSettings
 {
     float triangleRatio[kStaticLodCount] = { 1.0f, 1.0f, 1.0f };
+    float targetError[kStaticLodCount] = { 0.0f, 5e-2f, 2e-1f };
+    float normalWeight[kStaticLodCount] = { 0.0f, 0.5f, 0.25f };
+    float uvWeight[kStaticLodCount] = { 0.0f, 4.0f, 1.0f };
+    bool permissive[kStaticLodCount] = { false, true, true };
 };
 
 struct WeldedVertexKey
@@ -189,7 +193,11 @@ static uint32_t ComputeTargetTriangleCount(
     float triangleRatio);
 static WeldedSubMesh BuildMeshoptSimplifiedWeldedSubMesh(
     const WeldedSubMesh& src,
-    uint32_t targetTriangleCount);
+    uint32_t targetTriangleCount,
+    float targetError,
+    float normalWeight,
+    float uvWeight,
+    bool permissive);
 
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
@@ -1258,7 +1266,11 @@ static uint32_t ComputeTargetTriangleCount(
 
 static WeldedSubMesh BuildMeshoptSimplifiedWeldedSubMesh(
     const WeldedSubMesh& src,
-    uint32_t targetTriangleCount)
+    uint32_t targetTriangleCount,
+    float targetError,
+    float normalWeight,
+    float uvWeight,
+    bool permissive)
 {
     WeldedSubMesh out{};
     out.meshName = src.meshName;
@@ -1280,13 +1292,15 @@ static WeldedSubMesh BuildMeshoptSimplifiedWeldedSubMesh(
         return src;
 
     const size_t targetIndexCount = static_cast<size_t>(targetTriangleCount) * 3u;
-    const float targetError = 1e-2f;
 
     const float attrWeights[5] =
     {
-        0.5f, 0.5f, 0.5f,   // normal xyz
-        16.0f, 16.0f        // uv xy
+        normalWeight, normalWeight, normalWeight,
+        uvWeight, uvWeight
     };
+
+    const unsigned int simplifyOptions =
+        permissive ? meshopt_SimplifyPermissive : 0u;
 
     std::vector<unsigned int> lodIndices(sourceIndexCount);
     float lodError = 0.0f;
@@ -1305,10 +1319,13 @@ static WeldedSubMesh BuildMeshoptSimplifiedWeldedSubMesh(
         nullptr,
         targetIndexCount,
         targetError,
-        0,
+        simplifyOptions,
         &lodError);
 
     if (lodIndexCount < 3)
+        return src;
+
+    if (lodIndexCount >= sourceIndexCount)
         return src;
 
     lodIndices.resize(lodIndexCount);
@@ -1388,7 +1405,15 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
             ComputeTargetTriangleCount(weldedTriangleCount, targetTriangleRatio);
 
         const WeldedSubMesh simplifiedWeldedSubMesh =
-            BuildMeshoptSimplifiedWeldedSubMesh(weldedSubMesh, targetTriangleCount);
+            (clampedLodLevel == 0)
+            ? weldedSubMesh
+            : BuildMeshoptSimplifiedWeldedSubMesh(
+                weldedSubMesh,
+                targetTriangleCount,
+                settings.targetError[clampedLodLevel],
+                settings.normalWeight[clampedLodLevel],
+                settings.uvWeight[clampedLodLevel],
+                settings.permissive[clampedLodLevel]);
 
         SubMesh rebuiltSubMesh =
             BuildSubMeshFromWeldedSubMesh(simplifiedWeldedSubMesh);
@@ -1416,6 +1441,10 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
         DLOG("[LOD SIMPLIFY] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
         DLOG("lodLevel="); DLOG(clampedLodLevel); DLOG(" ");
         DLOG("targetTriangles="); DLOG(targetTriangleCount); DLOG(" ");
+        DLOG("targetError="); DLOG(settings.targetError[clampedLodLevel]); DLOG(" ");
+        DLOG("normalWeight="); DLOG(settings.normalWeight[clampedLodLevel]); DLOG(" ");
+        DLOG("uvWeight="); DLOG(settings.uvWeight[clampedLodLevel]); DLOG(" ");
+        DLOG("permissive="); DLOG(settings.permissive[clampedLodLevel] ? 1 : 0); DLOG(" ");
         DLOG("simplifiedVertices="); DLOG(simplifiedVertexCount); DLOG(" ");
         DLOG("simplifiedTriangles="); DLOGLN(simplifiedTriangleCount);
 
@@ -1819,9 +1848,26 @@ int main()
         const std::vector<SubMesh> baseSubMeshes = g_SubMeshes;
 
         StaticLodBuildSettings lodSettings{};
+
         lodSettings.triangleRatio[0] = 1.0f;
         lodSettings.triangleRatio[1] = 0.5f;
         lodSettings.triangleRatio[2] = 0.2f;
+
+        lodSettings.targetError[0] = 0.0f;
+        lodSettings.targetError[1] = 5e-2f;
+        lodSettings.targetError[2] = 2e-1f;
+
+        lodSettings.normalWeight[0] = 0.0f;
+        lodSettings.normalWeight[1] = 0.5f;
+        lodSettings.normalWeight[2] = 0.25f;
+
+        lodSettings.uvWeight[0] = 0.0f;
+        lodSettings.uvWeight[1] = 4.0f;
+        lodSettings.uvWeight[2] = 1.0f;
+
+        lodSettings.permissive[0] = false;
+        lodSettings.permissive[1] = true;
+        lodSettings.permissive[2] = true;
 
         const std::vector<SubMesh> lod0SubMeshes =
             BuildLodSubMeshesFromBase(baseSubMeshes, lodSettings, 0);
