@@ -136,7 +136,29 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="allocator.cpp" />
+    <ClCompile Include="clusterizer.cpp" />
+    <ClCompile Include="indexanalyzer.cpp" />
+    <ClCompile Include="indexcodec.cpp" />
+    <ClCompile Include="indexgenerator.cpp" />
+    <ClCompile Include="meshletcodec.cpp" />
+    <ClCompile Include="meshletutils.cpp" />
+    <ClCompile Include="opacitymap.cpp" />
+    <ClCompile Include="overdrawoptimizer.cpp" />
+    <ClCompile Include="partition.cpp" />
+    <ClCompile Include="quantization.cpp" />
+    <ClCompile Include="rasterizer.cpp" />
+    <ClCompile Include="simplifier.cpp" />
+    <ClCompile Include="spatialorder.cpp" />
     <ClCompile Include="StaticModelBinExtractor.cpp" />
+    <ClCompile Include="stripifier.cpp" />
+    <ClCompile Include="vcacheoptimizer.cpp" />
+    <ClCompile Include="vertexcodec.cpp" />
+    <ClCompile Include="vertexfilter.cpp" />
+    <ClCompile Include="vfetchoptimizer.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="meshoptimizer.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

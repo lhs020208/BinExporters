@@ -16,6 +16,7 @@
 #include <set>
 
 #include <fbxsdk.h>
+#include "meshoptimizer.h"
 using namespace std;
 
 // ==========================================================

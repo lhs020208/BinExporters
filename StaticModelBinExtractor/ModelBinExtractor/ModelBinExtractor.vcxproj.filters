@@ -13,10 +13,75 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="소스 파일\meshoptimizer">
+      <UniqueIdentifier>{07051505-2291-469e-a41c-466f0bdebe77}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="StaticModelBinExtractor.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="allocator.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="clusterizer.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="indexanalyzer.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="indexcodec.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="indexgenerator.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="meshletcodec.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="meshletutils.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="opacitymap.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="overdrawoptimizer.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="partition.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="quantization.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="rasterizer.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="simplifier.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="spatialorder.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="stripifier.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="vcacheoptimizer.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="vertexcodec.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="vertexfilter.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+    <ClCompile Include="vfetchoptimizer.cpp">
+      <Filter>소스 파일\meshoptimizer</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="meshoptimizer.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
