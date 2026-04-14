@@ -892,9 +892,9 @@ static void FillExplicitLocalOOBBMatrix(
 // Material 섹션
 // ==========================================================
 
-static void WriteMaterialSection()
+static void WriteMaterialSection(const std::vector<Material>& materials)
 {
-    for (auto& m : g_Materials)
+    for (const auto& m : materials)
     {
         WriteStringUtf8(m.name);
         WriteStringUtf8(m.diffuseTextureName);
@@ -917,7 +917,9 @@ static void WriteMaterialSection()
 // 헤더 (boneCount=0)
 // ==========================================================
 
-static void WriteModelHeader()
+static void WriteModelHeader(
+    const std::vector<Material>& materials,
+    const std::vector<SubMesh>& subMeshes)
 {
     char magic[4] = { 'M', 'B', 'I', 'N' };
     WriteRaw(magic, 4);
@@ -925,8 +927,8 @@ static void WriteModelHeader()
     uint32_t version = 5;
     uint32_t flags = 0;
     uint32_t boneCount = 0; // 비스킨 전용
-    uint32_t materialCount = (uint32_t)g_Materials.size();
-    uint32_t subCount = (uint32_t)g_SubMeshes.size();
+    uint32_t materialCount = (uint32_t)materials.size();
+    uint32_t subCount = (uint32_t)subMeshes.size();
 
     WriteUInt32(version);
     WriteUInt32(flags);
@@ -948,9 +950,9 @@ static void WriteSkeletonSection_Empty()
 // SubMesh 섹션
 // ==========================================================
 
-static void WriteSubMeshSection()
+static void WriteSubMeshSection(const std::vector<SubMesh>& subMeshes)
 {
-    for (auto& sm : g_SubMeshes)
+    for (const auto& sm : subMeshes)
     {
         WriteStringUtf8(sm.meshName);
         WriteStringUtf8(sm.authoringPath);
@@ -980,18 +982,29 @@ static void WriteSubMeshSection()
     }
 }
 
-static bool SaveModelBin(const std::string& filename)
+static bool SaveModelBin(
+    const std::string& filename,
+    const std::vector<Material>& materials,
+    const std::vector<SubMesh>& subMeshes)
 {
     g_out.open(filename, ios::binary);
     if (!g_out.is_open()) return false;
 
-    WriteModelHeader();
+    WriteModelHeader(materials, subMeshes);
     WriteSkeletonSection_Empty();
-    WriteMaterialSection();
-    WriteSubMeshSection();
+    WriteMaterialSection(materials);
+    WriteSubMeshSection(subMeshes);
 
     g_out.close();
     return true;
+}
+
+static std::string BuildLodBinFilePath(
+    const std::string& exportDir,
+    const std::string& stem,
+    int lodLevel)
+{
+    return exportDir + "/" + stem + "_LOD" + std::to_string(lodLevel) + ".bin";
 }
 
 // ==========================================================
@@ -1356,7 +1369,10 @@ int main()
 
         std::string name = path.stem().string();
         std::string fbxFileName = path.string();
-        std::string binFileName = exportDir + "/" + name + ".bin";
+
+        std::string lod0BinFileName = BuildLodBinFilePath(exportDir, name, 0);
+        std::string lod1BinFileName = BuildLodBinFilePath(exportDir, name, 1);
+        std::string lod2BinFileName = BuildLodBinFilePath(exportDir, name, 2);
 
         cout << "\n==========================================\n";
         cout << "처리 중: " << fbxFileName << "\n";
@@ -1376,10 +1392,24 @@ int main()
 
         ExtractFromFBX_StaticOnly(scene);
 
-        if (SaveModelBin(binFileName))
-            cout << "BIN 생성 완료: " << binFileName << "\n";
+        const std::vector<SubMesh> lod0SubMeshes = g_SubMeshes;
+        const std::vector<SubMesh> lod1SubMeshes = g_SubMeshes;
+        const std::vector<SubMesh> lod2SubMeshes = g_SubMeshes;
+
+        if (SaveModelBin(lod0BinFileName, g_Materials, lod0SubMeshes))
+            cout << "BIN 생성 완료: " << lod0BinFileName << "\n";
         else
-            cout << "BIN 생성 실패: " << binFileName << "\n";
+            cout << "BIN 생성 실패: " << lod0BinFileName << "\n";
+
+        if (SaveModelBin(lod1BinFileName, g_Materials, lod1SubMeshes))
+            cout << "BIN 생성 완료: " << lod1BinFileName << "\n";
+        else
+            cout << "BIN 생성 실패: " << lod1BinFileName << "\n";
+
+        if (SaveModelBin(lod2BinFileName, g_Materials, lod2SubMeshes))
+            cout << "BIN 생성 완료: " << lod2BinFileName << "\n";
+        else
+            cout << "BIN 생성 실패: " << lod2BinFileName << "\n";
 
         scene->Destroy();
     }
