@@ -183,6 +183,13 @@ static uint32_t FindOrAddWeldedVertex(
 static WeldedSubMesh BuildWeldedSubMeshFromSubMesh(const SubMesh& src);
 static SubMesh BuildSubMeshFromWeldedSubMesh(const WeldedSubMesh& src);
 
+static uint32_t ComputeTargetTriangleCount(
+    uint32_t sourceTriangleCount,
+    float triangleRatio);
+static WeldedSubMesh BuildTriangleClippedWeldedSubMesh(
+    const WeldedSubMesh& src,
+    uint32_t targetTriangleCount);
+
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
     const StaticLodBuildSettings& settings,
@@ -1222,6 +1229,79 @@ static SubMesh BuildSubMeshFromWeldedSubMesh(const WeldedSubMesh& src)
     return out;
 }
 
+static uint32_t ComputeTargetTriangleCount(
+    uint32_t sourceTriangleCount,
+    float triangleRatio)
+{
+    if (sourceTriangleCount == 0)
+        return 0;
+
+    if (triangleRatio >= 1.0f)
+        return sourceTriangleCount;
+
+    if (triangleRatio <= 0.0f)
+        return 1u;
+
+    const float rawTarget = static_cast<float>(sourceTriangleCount) * triangleRatio;
+    uint32_t targetTriangleCount =
+        static_cast<uint32_t>(std::floor(rawTarget + 0.5f));
+
+    if (targetTriangleCount < 1u)
+        targetTriangleCount = 1u;
+
+    if (targetTriangleCount > sourceTriangleCount)
+        targetTriangleCount = sourceTriangleCount;
+
+    return targetTriangleCount;
+}
+
+static WeldedSubMesh BuildTriangleClippedWeldedSubMesh(
+    const WeldedSubMesh& src,
+    uint32_t targetTriangleCount)
+{
+    WeldedSubMesh out{};
+    out.meshName = src.meshName;
+    out.authoringPath = src.authoringPath;
+    out.materialIndex = src.materialIndex;
+    out.hasExplicitLocalOOBB = src.hasExplicitLocalOOBB;
+
+    for (int i = 0; i < 16; ++i)
+        out.explicitLocalOOBBMatrix[i] = src.explicitLocalOOBBMatrix[i];
+
+    const uint32_t sourceTriangleCount =
+        static_cast<uint32_t>(src.indices.size() / 3);
+
+    const uint32_t clippedTriangleCount =
+        std::min(targetTriangleCount, sourceTriangleCount);
+
+    const uint32_t clippedIndexCount = clippedTriangleCount * 3u;
+
+    out.vertices.reserve(std::min<uint32_t>(
+        static_cast<uint32_t>(src.vertices.size()),
+        clippedIndexCount));
+    out.indices.reserve(clippedIndexCount);
+
+    std::vector<uint32_t> remap(src.vertices.size(), 0xFFFFFFFFu);
+
+    for (uint32_t i = 0; i < clippedIndexCount; ++i)
+    {
+        const uint32_t srcIndex = src.indices[i];
+        if (srcIndex >= src.vertices.size())
+            continue;
+
+        uint32_t& dstIndex = remap[srcIndex];
+        if (dstIndex == 0xFFFFFFFFu)
+        {
+            dstIndex = static_cast<uint32_t>(out.vertices.size());
+            out.vertices.push_back(src.vertices[srcIndex]);
+        }
+
+        out.indices.push_back(dstIndex);
+    }
+
+    return out;
+}
+
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
     const StaticLodBuildSettings& settings,
@@ -1241,19 +1321,39 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     for (const SubMesh& baseSubMesh : baseSubMeshes)
     {
         const WeldedSubMesh weldedSubMesh = BuildWeldedSubMeshFromSubMesh(baseSubMesh);
-        SubMesh rebuiltSubMesh = BuildSubMeshFromWeldedSubMesh(weldedSubMesh);
 
-#if DEBUGLOG
-        const uint32_t srcVertexCount = static_cast<uint32_t>(baseSubMesh.vertices.size());
-        const uint32_t srcIndexCount = static_cast<uint32_t>(baseSubMesh.indices.size());
+        const uint32_t srcVertexCount =
+            static_cast<uint32_t>(baseSubMesh.vertices.size());
+        const uint32_t srcIndexCount =
+            static_cast<uint32_t>(baseSubMesh.indices.size());
         const uint32_t srcTriangleCount = srcIndexCount / 3;
 
-        const uint32_t weldedVertexCount = static_cast<uint32_t>(weldedSubMesh.vertices.size());
-        const uint32_t weldedIndexCount = static_cast<uint32_t>(weldedSubMesh.indices.size());
+        const uint32_t weldedVertexCount =
+            static_cast<uint32_t>(weldedSubMesh.vertices.size());
+        const uint32_t weldedIndexCount =
+            static_cast<uint32_t>(weldedSubMesh.indices.size());
         const uint32_t weldedTriangleCount = weldedIndexCount / 3;
 
-        const uint32_t rebuiltVertexCount = static_cast<uint32_t>(rebuiltSubMesh.vertices.size());
-        const uint32_t rebuiltIndexCount = static_cast<uint32_t>(rebuiltSubMesh.indices.size());
+        const uint32_t targetTriangleCount =
+            ComputeTargetTriangleCount(weldedTriangleCount, targetTriangleRatio);
+
+        const WeldedSubMesh clippedWeldedSubMesh =
+            BuildTriangleClippedWeldedSubMesh(weldedSubMesh, targetTriangleCount);
+
+        SubMesh rebuiltSubMesh =
+            BuildSubMeshFromWeldedSubMesh(clippedWeldedSubMesh);
+
+#if DEBUGLOG
+        const uint32_t clippedVertexCount =
+            static_cast<uint32_t>(clippedWeldedSubMesh.vertices.size());
+        const uint32_t clippedIndexCount =
+            static_cast<uint32_t>(clippedWeldedSubMesh.indices.size());
+        const uint32_t clippedTriangleCount = clippedIndexCount / 3;
+
+        const uint32_t rebuiltVertexCount =
+            static_cast<uint32_t>(rebuiltSubMesh.vertices.size());
+        const uint32_t rebuiltIndexCount =
+            static_cast<uint32_t>(rebuiltSubMesh.indices.size());
         const uint32_t rebuiltTriangleCount = rebuiltIndexCount / 3;
 
         DLOG("[LOD WELD] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
@@ -1262,6 +1362,12 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
         DLOG("weldedVertices="); DLOG(weldedVertexCount); DLOG(" ");
         DLOG("srcTriangles="); DLOG(srcTriangleCount); DLOG(" ");
         DLOG("weldedTriangles="); DLOGLN(weldedTriangleCount);
+
+        DLOG("[LOD CLIP] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
+        DLOG("lodLevel="); DLOG(clampedLodLevel); DLOG(" ");
+        DLOG("targetTriangles="); DLOG(targetTriangleCount); DLOG(" ");
+        DLOG("clippedVertices="); DLOG(clippedVertexCount); DLOG(" ");
+        DLOG("clippedTriangles="); DLOGLN(clippedTriangleCount);
 
         DLOG("[LOD REBUILD] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
         DLOG("lodLevel="); DLOG(clampedLodLevel); DLOG(" ");
@@ -1273,9 +1379,10 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     }
 
     // ------------------------------------------------------
-    // 4단계에서는 welded 결과를 실제 반환용 SubMesh로 재구성한다.
-    // 아직 triangle 감소는 하지 않으므로 LOD0/1/2는 서로 동일해야 정상이다.
-    // 실제 simplification은 다음 단계에서 weldedSubMesh 기준으로 넣는다.
+    // 5단계는 임시 단계다.
+    // welded mesh에서 triangle 비율만큼 앞부분 인덱스를 잘라내서
+    // LOD1/LOD2의 출력 크기와 경로가 실제로 달라지는지만 확인한다.
+    // 외형 품질은 아직 보장하지 않는다.
     // ------------------------------------------------------
 
     return outSubMeshes;
