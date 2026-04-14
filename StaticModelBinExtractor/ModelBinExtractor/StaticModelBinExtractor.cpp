@@ -174,12 +174,14 @@ static float GetStaticLodTriangleRatio(const StaticLodBuildSettings& settings, i
 
 static uint32_t FloatToBits(float v);
 static void CopySubMeshMetaToWeldedSubMesh(const SubMesh& src, WeldedSubMesh& dst);
+static void CopyWeldedSubMeshMetaToSubMesh(const WeldedSubMesh& src, SubMesh& dst);
 static WeldedVertexKey MakeWeldedVertexKey(const Vertex& v);
 static uint32_t FindOrAddWeldedVertex(
     const Vertex& srcVertex,
     std::vector<Vertex>& outVertices,
     std::unordered_map<WeldedVertexKey, uint32_t, WeldedVertexKeyHasher>& keyToIndex);
 static WeldedSubMesh BuildWeldedSubMeshFromSubMesh(const SubMesh& src);
+static SubMesh BuildSubMeshFromWeldedSubMesh(const WeldedSubMesh& src);
 
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
@@ -1125,6 +1127,17 @@ static void CopySubMeshMetaToWeldedSubMesh(const SubMesh& src, WeldedSubMesh& ds
         dst.explicitLocalOOBBMatrix[i] = src.explicitLocalOOBBMatrix[i];
 }
 
+static void CopyWeldedSubMeshMetaToSubMesh(const WeldedSubMesh& src, SubMesh& dst)
+{
+    dst.meshName = src.meshName;
+    dst.authoringPath = src.authoringPath;
+    dst.materialIndex = src.materialIndex;
+    dst.hasExplicitLocalOOBB = src.hasExplicitLocalOOBB;
+
+    for (int i = 0; i < 16; ++i)
+        dst.explicitLocalOOBBMatrix[i] = src.explicitLocalOOBBMatrix[i];
+}
+
 static WeldedVertexKey MakeWeldedVertexKey(const Vertex& v)
 {
     WeldedVertexKey key{};
@@ -1198,6 +1211,17 @@ static WeldedSubMesh BuildWeldedSubMeshFromSubMesh(const SubMesh& src)
     return out;
 }
 
+static SubMesh BuildSubMeshFromWeldedSubMesh(const WeldedSubMesh& src)
+{
+    SubMesh out{};
+    CopyWeldedSubMeshMetaToSubMesh(src, out);
+
+    out.vertices = src.vertices;
+    out.indices = src.indices;
+
+    return out;
+}
+
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
     const StaticLodBuildSettings& settings,
@@ -1211,11 +1235,13 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     DLOG(" targetTriangleRatio="); DLOGLN(targetTriangleRatio);
 #endif
 
-    std::vector<SubMesh> outSubMeshes = baseSubMeshes;
+    std::vector<SubMesh> outSubMeshes;
+    outSubMeshes.reserve(baseSubMeshes.size());
 
     for (const SubMesh& baseSubMesh : baseSubMeshes)
     {
         const WeldedSubMesh weldedSubMesh = BuildWeldedSubMeshFromSubMesh(baseSubMesh);
+        SubMesh rebuiltSubMesh = BuildSubMeshFromWeldedSubMesh(weldedSubMesh);
 
 #if DEBUGLOG
         const uint32_t srcVertexCount = static_cast<uint32_t>(baseSubMesh.vertices.size());
@@ -1226,26 +1252,34 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
         const uint32_t weldedIndexCount = static_cast<uint32_t>(weldedSubMesh.indices.size());
         const uint32_t weldedTriangleCount = weldedIndexCount / 3;
 
+        const uint32_t rebuiltVertexCount = static_cast<uint32_t>(rebuiltSubMesh.vertices.size());
+        const uint32_t rebuiltIndexCount = static_cast<uint32_t>(rebuiltSubMesh.indices.size());
+        const uint32_t rebuiltTriangleCount = rebuiltIndexCount / 3;
+
         DLOG("[LOD WELD] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
         DLOG("lodLevel="); DLOG(clampedLodLevel); DLOG(" ");
         DLOG("srcVertices="); DLOG(srcVertexCount); DLOG(" ");
         DLOG("weldedVertices="); DLOG(weldedVertexCount); DLOG(" ");
         DLOG("srcTriangles="); DLOG(srcTriangleCount); DLOG(" ");
         DLOG("weldedTriangles="); DLOGLN(weldedTriangleCount);
+
+        DLOG("[LOD REBUILD] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
+        DLOG("lodLevel="); DLOG(clampedLodLevel); DLOG(" ");
+        DLOG("rebuiltVertices="); DLOG(rebuiltVertexCount); DLOG(" ");
+        DLOG("rebuiltTriangles="); DLOGLN(rebuiltTriangleCount);
 #endif
 
-        (void)weldedSubMesh;
+        outSubMeshes.push_back(std::move(rebuiltSubMesh));
     }
 
     // ------------------------------------------------------
-    // 3단계에서는 아직 실제 simplification/rebuild를 하지 않는다.
-    // 현재는 weld 중간구조를 만들고 검증 로그만 출력한다.
-    // 실제 LOD 결과 반영은 다음 단계에서 진행한다.
+    // 4단계에서는 welded 결과를 실제 반환용 SubMesh로 재구성한다.
+    // 아직 triangle 감소는 하지 않으므로 LOD0/1/2는 서로 동일해야 정상이다.
+    // 실제 simplification은 다음 단계에서 weldedSubMesh 기준으로 넣는다.
     // ------------------------------------------------------
 
     return outSubMeshes;
 }
-
 
 // ==========================================================
 // FBX -> RAM 추출 (비스킨 전용)
