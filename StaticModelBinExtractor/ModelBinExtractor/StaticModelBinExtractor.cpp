@@ -99,6 +99,20 @@ vector<Material> g_Materials;
 unordered_map<string, uint32_t> g_MaterialNameToIndex;
 vector<SubMesh> g_SubMeshes;
 
+static constexpr int kStaticLodCount = 3;
+
+struct StaticLodBuildSettings
+{
+    float triangleRatio[kStaticLodCount] = { 1.0f, 1.0f, 1.0f };
+};
+
+static int ClampStaticLodLevel(int lodLevel);
+static float GetStaticLodTriangleRatio(const StaticLodBuildSettings& settings, int lodLevel);
+static std::vector<SubMesh> BuildLodSubMeshesFromBase(
+    const std::vector<SubMesh>& baseSubMeshes,
+    const StaticLodBuildSettings& settings,
+    int lodLevel);
+
 // ==========================================================
 // 파일 출력 스트림
 // ==========================================================
@@ -1007,6 +1021,43 @@ static std::string BuildLodBinFilePath(
     return exportDir + "/" + stem + "_LOD" + std::to_string(lodLevel) + ".bin";
 }
 
+static int ClampStaticLodLevel(int lodLevel)
+{
+    if (lodLevel < 0) return 0;
+    if (lodLevel >= kStaticLodCount) return (kStaticLodCount - 1);
+    return lodLevel;
+}
+
+static float GetStaticLodTriangleRatio(const StaticLodBuildSettings& settings, int lodLevel)
+{
+    const int clampedLodLevel = ClampStaticLodLevel(lodLevel);
+    return settings.triangleRatio[clampedLodLevel];
+}
+
+static std::vector<SubMesh> BuildLodSubMeshesFromBase(
+    const std::vector<SubMesh>& baseSubMeshes,
+    const StaticLodBuildSettings& settings,
+    int lodLevel)
+{
+    const int clampedLodLevel = ClampStaticLodLevel(lodLevel);
+    const float targetTriangleRatio = GetStaticLodTriangleRatio(settings, clampedLodLevel);
+
+#if DEBUGLOG
+    DLOG("[LOD BUILD] lodLevel="); DLOG(clampedLodLevel);
+    DLOG(" targetTriangleRatio="); DLOGLN(targetTriangleRatio);
+#endif
+
+    std::vector<SubMesh> outSubMeshes = baseSubMeshes;
+
+    // ------------------------------------------------------
+    // 2단계에서는 아직 실제 단순화를 하지 않는다.
+    // 현재는 호출 경로만 분리하는 단계이므로 원본을 그대로 복사한다.
+    // 이후 단계에서 이 함수 내부에 weld/simplify/rebuild를 넣는다.
+    // ------------------------------------------------------
+
+    return outSubMeshes;
+}
+
 // ==========================================================
 // FBX -> RAM 추출 (비스킨 전용)
 // ==========================================================
@@ -1392,9 +1443,19 @@ int main()
 
         ExtractFromFBX_StaticOnly(scene);
 
-        const std::vector<SubMesh> lod0SubMeshes = g_SubMeshes;
-        const std::vector<SubMesh> lod1SubMeshes = g_SubMeshes;
-        const std::vector<SubMesh> lod2SubMeshes = g_SubMeshes;
+        const std::vector<SubMesh> baseSubMeshes = g_SubMeshes;
+
+        StaticLodBuildSettings lodSettings{};
+        lodSettings.triangleRatio[0] = 1.0f;
+        lodSettings.triangleRatio[1] = 0.5f;
+        lodSettings.triangleRatio[2] = 0.2f;
+
+        const std::vector<SubMesh> lod0SubMeshes =
+            BuildLodSubMeshesFromBase(baseSubMeshes, lodSettings, 0);
+        const std::vector<SubMesh> lod1SubMeshes =
+            BuildLodSubMeshesFromBase(baseSubMeshes, lodSettings, 1);
+        const std::vector<SubMesh> lod2SubMeshes =
+            BuildLodSubMeshesFromBase(baseSubMeshes, lodSettings, 2);
 
         if (SaveModelBin(lod0BinFileName, g_Materials, lod0SubMeshes))
             cout << "BIN 생성 완료: " << lod0BinFileName << "\n";
