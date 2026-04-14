@@ -170,38 +170,6 @@ struct WeldedSubMesh
     vector<uint32_t> indices;
 };
 
-struct PositionClusterKey
-{
-    int32_t x = 0;
-    int32_t y = 0;
-    int32_t z = 0;
-
-    bool operator==(const PositionClusterKey& rhs) const
-    {
-        return x == rhs.x && y == rhs.y && z == rhs.z;
-    }
-};
-
-struct PositionClusterKeyHasher
-{
-    size_t operator()(const PositionClusterKey& key) const noexcept
-    {
-        size_t h = 1469598103934665603ull;
-
-        auto HashCombine = [&](int32_t v)
-            {
-                h ^= static_cast<size_t>(static_cast<uint32_t>(v)) +
-                    0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-            };
-
-        HashCombine(key.x);
-        HashCombine(key.y);
-        HashCombine(key.z);
-
-        return h;
-    }
-};
-
 static int ClampStaticLodLevel(int lodLevel);
 static float GetStaticLodTriangleRatio(const StaticLodBuildSettings& settings, int lodLevel);
 
@@ -219,16 +187,7 @@ static SubMesh BuildSubMeshFromWeldedSubMesh(const WeldedSubMesh& src);
 static uint32_t ComputeTargetTriangleCount(
     uint32_t sourceTriangleCount,
     float triangleRatio);
-static void ComputeWeldedSubMeshPositionBounds(
-    const WeldedSubMesh& src,
-    float outMin[3],
-    float outMax[3]);
-static PositionClusterKey MakePositionClusterKey(
-    const Vertex& v,
-    const float boundsMin[3],
-    const float invCellSize[3],
-    uint32_t resolution);
-static WeldedSubMesh BuildClusterSimplifiedWeldedSubMesh(
+static WeldedSubMesh BuildMeshoptSimplifiedWeldedSubMesh(
     const WeldedSubMesh& src,
     uint32_t targetTriangleCount);
 
@@ -1297,63 +1256,7 @@ static uint32_t ComputeTargetTriangleCount(
     return targetTriangleCount;
 }
 
-static void ComputeWeldedSubMeshPositionBounds(
-    const WeldedSubMesh& src,
-    float outMin[3],
-    float outMax[3])
-{
-    outMin[0] = outMin[1] = outMin[2] = FLT_MAX;
-    outMax[0] = outMax[1] = outMax[2] = -FLT_MAX;
-
-    if (src.vertices.empty())
-    {
-        outMin[0] = outMin[1] = outMin[2] = 0.0f;
-        outMax[0] = outMax[1] = outMax[2] = 0.0f;
-        return;
-    }
-
-    for (const Vertex& v : src.vertices)
-    {
-        outMin[0] = std::min(outMin[0], v.position[0]);
-        outMin[1] = std::min(outMin[1], v.position[1]);
-        outMin[2] = std::min(outMin[2], v.position[2]);
-
-        outMax[0] = std::max(outMax[0], v.position[0]);
-        outMax[1] = std::max(outMax[1], v.position[1]);
-        outMax[2] = std::max(outMax[2], v.position[2]);
-    }
-}
-
-static PositionClusterKey MakePositionClusterKey(
-    const Vertex& v,
-    const float boundsMin[3],
-    const float invCellSize[3],
-    uint32_t resolution)
-{
-    PositionClusterKey key{};
-
-    auto Quantize = [&](float p, float minV, float invSize) -> int32_t
-        {
-            if (resolution <= 1u)
-                return 0;
-
-            const float local = (p - minV) * invSize;
-            int32_t q = static_cast<int32_t>(std::floor(local));
-
-            const int32_t maxCell = static_cast<int32_t>(resolution) - 1;
-            if (q < 0) q = 0;
-            if (q > maxCell) q = maxCell;
-            return q;
-        };
-
-    key.x = Quantize(v.position[0], boundsMin[0], invCellSize[0]);
-    key.y = Quantize(v.position[1], boundsMin[1], invCellSize[1]);
-    key.z = Quantize(v.position[2], boundsMin[2], invCellSize[2]);
-
-    return key;
-}
-
-static WeldedSubMesh BuildClusterSimplifiedWeldedSubMesh(
+static WeldedSubMesh BuildMeshoptSimplifiedWeldedSubMesh(
     const WeldedSubMesh& src,
     uint32_t targetTriangleCount)
 {
@@ -1366,141 +1269,86 @@ static WeldedSubMesh BuildClusterSimplifiedWeldedSubMesh(
     for (int i = 0; i < 16; ++i)
         out.explicitLocalOOBBMatrix[i] = src.explicitLocalOOBBMatrix[i];
 
-    const uint32_t sourceTriangleCount =
-        static_cast<uint32_t>(src.indices.size() / 3);
+    const size_t sourceIndexCount = src.indices.size();
+    const size_t sourceVertexCount = src.vertices.size();
+    const uint32_t sourceTriangleCount = static_cast<uint32_t>(sourceIndexCount / 3u);
 
-    if (sourceTriangleCount == 0 || src.vertices.empty())
+    if (sourceTriangleCount == 0 || sourceVertexCount == 0)
         return out;
 
     if (targetTriangleCount >= sourceTriangleCount)
         return src;
 
-    const uint32_t sourceVertexCount =
-        static_cast<uint32_t>(src.vertices.size());
+    const size_t targetIndexCount = static_cast<size_t>(targetTriangleCount) * 3u;
+    const float targetError = 1e-2f;
 
-    const uint32_t targetVertexBudget =
-        std::max(4u, std::min(sourceVertexCount, targetTriangleCount * 2u));
-
-    uint32_t resolution =
-        std::max(1u, static_cast<uint32_t>(
-            std::ceil(std::cbrt(static_cast<double>(targetVertexBudget)))));
-
-    float boundsMin[3];
-    float boundsMax[3];
-    ComputeWeldedSubMeshPositionBounds(src, boundsMin, boundsMax);
-
-    const float extentX = std::max(boundsMax[0] - boundsMin[0], 1e-6f);
-    const float extentY = std::max(boundsMax[1] - boundsMin[1], 1e-6f);
-    const float extentZ = std::max(boundsMax[2] - boundsMin[2], 1e-6f);
-
-    const float cellSizeX = extentX / static_cast<float>(resolution);
-    const float cellSizeY = extentY / static_cast<float>(resolution);
-    const float cellSizeZ = extentZ / static_cast<float>(resolution);
-
-    const float invCellSize[3] =
+    const float attrWeights[5] =
     {
-        1.0f / std::max(cellSizeX, 1e-6f),
-        1.0f / std::max(cellSizeY, 1e-6f),
-        1.0f / std::max(cellSizeZ, 1e-6f)
+        0.5f, 0.5f, 0.5f,   // normal xyz
+        16.0f, 16.0f        // uv xy
     };
 
-    std::unordered_map<PositionClusterKey, uint32_t, PositionClusterKeyHasher> clusterMap;
-    clusterMap.reserve(src.vertices.size());
+    std::vector<unsigned int> lodIndices(sourceIndexCount);
+    float lodError = 0.0f;
 
-    std::vector<uint32_t> srcToCluster(src.vertices.size(), 0xFFFFFFFFu);
+    size_t lodIndexCount = meshopt_simplifyWithAttributes(
+        lodIndices.data(),
+        reinterpret_cast<const unsigned int*>(src.indices.data()),
+        sourceIndexCount,
+        &src.vertices[0].position[0],
+        sourceVertexCount,
+        sizeof(Vertex),
+        &src.vertices[0].normal[0],
+        sizeof(Vertex),
+        attrWeights,
+        5,
+        nullptr,
+        targetIndexCount,
+        targetError,
+        0,
+        &lodError);
 
-    struct ClusterData
+    if (lodIndexCount < 3)
+        return src;
+
+    lodIndices.resize(lodIndexCount);
+
+    std::vector<uint32_t> remap(sourceVertexCount, 0xFFFFFFFFu);
+    out.vertices.reserve(std::min(sourceVertexCount, lodIndexCount));
+    out.indices.reserve(lodIndexCount);
+
+    for (unsigned int srcIndex : lodIndices)
     {
-        Vertex representative{};
-        bool hasRepresentative = false;
-    };
-
-    std::vector<ClusterData> clusters;
-    clusters.reserve(src.vertices.size());
-
-    for (uint32_t i = 0; i < static_cast<uint32_t>(src.vertices.size()); ++i)
-    {
-        const Vertex& srcVertex = src.vertices[i];
-        const PositionClusterKey key =
-            MakePositionClusterKey(srcVertex, boundsMin, invCellSize, resolution);
-
-        auto it = clusterMap.find(key);
-        uint32_t clusterIndex = 0;
-
-        if (it == clusterMap.end())
-        {
-            clusterIndex = static_cast<uint32_t>(clusters.size());
-            clusterMap.emplace(key, clusterIndex);
-
-            ClusterData data{};
-            data.representative = srcVertex;
-            data.hasRepresentative = true;
-            clusters.push_back(data);
-        }
-        else
-        {
-            clusterIndex = it->second;
-        }
-
-        srcToCluster[i] = clusterIndex;
-    }
-
-    out.vertices.reserve(clusters.size());
-    for (const ClusterData& c : clusters)
-    {
-        if (c.hasRepresentative)
-            out.vertices.push_back(c.representative);
-    }
-
-    out.indices.reserve(targetTriangleCount * 3u);
-
-    for (uint32_t tri = 0; tri < sourceTriangleCount; ++tri)
-    {
-        const uint32_t i0 = src.indices[tri * 3u + 0u];
-        const uint32_t i1 = src.indices[tri * 3u + 1u];
-        const uint32_t i2 = src.indices[tri * 3u + 2u];
-
-        if (i0 >= srcToCluster.size() || i1 >= srcToCluster.size() || i2 >= srcToCluster.size())
+        if (srcIndex >= src.vertices.size())
             continue;
 
-        const uint32_t c0 = srcToCluster[i0];
-        const uint32_t c1 = srcToCluster[i1];
-        const uint32_t c2 = srcToCluster[i2];
-
-        if (c0 == c1 || c1 == c2 || c2 == c0)
-            continue;
-
-        out.indices.push_back(c0);
-        out.indices.push_back(c1);
-        out.indices.push_back(c2);
-
-        const uint32_t currentTriangleCount =
-            static_cast<uint32_t>(out.indices.size() / 3u);
-
-        if (currentTriangleCount >= targetTriangleCount)
-            break;
-    }
-
-    std::vector<uint32_t> remap(out.vertices.size(), 0xFFFFFFFFu);
-    std::vector<Vertex> compactVertices;
-    compactVertices.reserve(out.vertices.size());
-
-    for (uint32_t& idx : out.indices)
-    {
-        if (idx >= out.vertices.size())
-            continue;
-
-        uint32_t& mapped = remap[idx];
-        if (mapped == 0xFFFFFFFFu)
+        uint32_t& dstIndex = remap[srcIndex];
+        if (dstIndex == 0xFFFFFFFFu)
         {
-            mapped = static_cast<uint32_t>(compactVertices.size());
-            compactVertices.push_back(out.vertices[idx]);
+            dstIndex = static_cast<uint32_t>(out.vertices.size());
+            out.vertices.push_back(src.vertices[srcIndex]);
         }
 
-        idx = mapped;
+        out.indices.push_back(dstIndex);
     }
 
-    out.vertices = std::move(compactVertices);
+    if (!out.indices.empty() && !out.vertices.empty())
+    {
+        meshopt_optimizeVertexCache(
+            reinterpret_cast<unsigned int*>(out.indices.data()),
+            reinterpret_cast<const unsigned int*>(out.indices.data()),
+            out.indices.size(),
+            out.vertices.size());
+
+        meshopt_optimizeVertexFetch(
+            out.vertices.data(),
+            reinterpret_cast<unsigned int*>(out.indices.data()),
+            out.indices.size(),
+            out.vertices.data(),
+            out.vertices.size(),
+            sizeof(Vertex));
+    }
+
     return out;
 }
 
@@ -1540,7 +1388,7 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
             ComputeTargetTriangleCount(weldedTriangleCount, targetTriangleRatio);
 
         const WeldedSubMesh simplifiedWeldedSubMesh =
-            BuildClusterSimplifiedWeldedSubMesh(weldedSubMesh, targetTriangleCount);
+            BuildMeshoptSimplifiedWeldedSubMesh(weldedSubMesh, targetTriangleCount);
 
         SubMesh rebuiltSubMesh =
             BuildSubMeshFromWeldedSubMesh(simplifiedWeldedSubMesh);
