@@ -106,8 +106,81 @@ struct StaticLodBuildSettings
     float triangleRatio[kStaticLodCount] = { 1.0f, 1.0f, 1.0f };
 };
 
+struct WeldedVertexKey
+{
+    uint32_t position[3] = {};
+    uint32_t normal[3] = {};
+    uint32_t uv[2] = {};
+
+    bool operator==(const WeldedVertexKey& rhs) const
+    {
+        return
+            position[0] == rhs.position[0] &&
+            position[1] == rhs.position[1] &&
+            position[2] == rhs.position[2] &&
+            normal[0] == rhs.normal[0] &&
+            normal[1] == rhs.normal[1] &&
+            normal[2] == rhs.normal[2] &&
+            uv[0] == rhs.uv[0] &&
+            uv[1] == rhs.uv[1];
+    }
+};
+
+struct WeldedVertexKeyHasher
+{
+    size_t operator()(const WeldedVertexKey& key) const noexcept
+    {
+        size_t h = 1469598103934665603ull;
+
+        auto HashCombine = [&](uint32_t v)
+            {
+                h ^= static_cast<size_t>(v) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+            };
+
+        HashCombine(key.position[0]);
+        HashCombine(key.position[1]);
+        HashCombine(key.position[2]);
+        HashCombine(key.normal[0]);
+        HashCombine(key.normal[1]);
+        HashCombine(key.normal[2]);
+        HashCombine(key.uv[0]);
+        HashCombine(key.uv[1]);
+
+        return h;
+    }
+};
+
+struct WeldedSubMesh
+{
+    string meshName;
+    string authoringPath;
+    uint32_t materialIndex = 0;
+
+    uint32_t hasExplicitLocalOOBB = 0;
+    float explicitLocalOOBBMatrix[16] =
+    {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+
+    vector<Vertex> vertices;
+    vector<uint32_t> indices;
+};
+
 static int ClampStaticLodLevel(int lodLevel);
 static float GetStaticLodTriangleRatio(const StaticLodBuildSettings& settings, int lodLevel);
+
+static uint32_t FloatToBits(float v);
+static void CopySubMeshMetaToWeldedSubMesh(const SubMesh& src, WeldedSubMesh& dst);
+static WeldedVertexKey MakeWeldedVertexKey(const Vertex& v);
+static uint32_t FindOrAddWeldedVertex(
+    const Vertex& srcVertex,
+    std::vector<Vertex>& outVertices,
+    std::unordered_map<WeldedVertexKey, uint32_t, WeldedVertexKeyHasher>& keyToIndex);
+static WeldedSubMesh BuildWeldedSubMeshFromSubMesh(const SubMesh& src);
+
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
     const StaticLodBuildSettings& settings,
@@ -1034,6 +1107,97 @@ static float GetStaticLodTriangleRatio(const StaticLodBuildSettings& settings, i
     return settings.triangleRatio[clampedLodLevel];
 }
 
+static uint32_t FloatToBits(float v)
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &v, sizeof(uint32_t));
+    return bits;
+}
+
+static void CopySubMeshMetaToWeldedSubMesh(const SubMesh& src, WeldedSubMesh& dst)
+{
+    dst.meshName = src.meshName;
+    dst.authoringPath = src.authoringPath;
+    dst.materialIndex = src.materialIndex;
+    dst.hasExplicitLocalOOBB = src.hasExplicitLocalOOBB;
+
+    for (int i = 0; i < 16; ++i)
+        dst.explicitLocalOOBBMatrix[i] = src.explicitLocalOOBBMatrix[i];
+}
+
+static WeldedVertexKey MakeWeldedVertexKey(const Vertex& v)
+{
+    WeldedVertexKey key{};
+
+    key.position[0] = FloatToBits(v.position[0]);
+    key.position[1] = FloatToBits(v.position[1]);
+    key.position[2] = FloatToBits(v.position[2]);
+
+    key.normal[0] = FloatToBits(v.normal[0]);
+    key.normal[1] = FloatToBits(v.normal[1]);
+    key.normal[2] = FloatToBits(v.normal[2]);
+
+    key.uv[0] = FloatToBits(v.uv[0]);
+    key.uv[1] = FloatToBits(v.uv[1]);
+
+    return key;
+}
+
+static uint32_t FindOrAddWeldedVertex(
+    const Vertex& srcVertex,
+    std::vector<Vertex>& outVertices,
+    std::unordered_map<WeldedVertexKey, uint32_t, WeldedVertexKeyHasher>& keyToIndex)
+{
+    const WeldedVertexKey key = MakeWeldedVertexKey(srcVertex);
+
+    auto it = keyToIndex.find(key);
+    if (it != keyToIndex.end())
+        return it->second;
+
+    const uint32_t newIndex = static_cast<uint32_t>(outVertices.size());
+    outVertices.push_back(srcVertex);
+    keyToIndex.emplace(key, newIndex);
+    return newIndex;
+}
+
+static WeldedSubMesh BuildWeldedSubMeshFromSubMesh(const SubMesh& src)
+{
+    WeldedSubMesh out{};
+    CopySubMeshMetaToWeldedSubMesh(src, out);
+
+    out.vertices.reserve(src.vertices.size());
+    out.indices.reserve(src.indices.empty() ? src.vertices.size() : src.indices.size());
+
+    std::unordered_map<WeldedVertexKey, uint32_t, WeldedVertexKeyHasher> keyToIndex;
+    keyToIndex.reserve(src.vertices.size());
+
+    if (!src.indices.empty())
+    {
+        for (uint32_t srcIndex : src.indices)
+        {
+            if (srcIndex >= src.vertices.size())
+                continue;
+
+            const uint32_t weldedIndex =
+                FindOrAddWeldedVertex(src.vertices[srcIndex], out.vertices, keyToIndex);
+
+            out.indices.push_back(weldedIndex);
+        }
+    }
+    else
+    {
+        for (const Vertex& v : src.vertices)
+        {
+            const uint32_t weldedIndex =
+                FindOrAddWeldedVertex(v, out.vertices, keyToIndex);
+
+            out.indices.push_back(weldedIndex);
+        }
+    }
+
+    return out;
+}
+
 static std::vector<SubMesh> BuildLodSubMeshesFromBase(
     const std::vector<SubMesh>& baseSubMeshes,
     const StaticLodBuildSettings& settings,
@@ -1049,14 +1213,39 @@ static std::vector<SubMesh> BuildLodSubMeshesFromBase(
 
     std::vector<SubMesh> outSubMeshes = baseSubMeshes;
 
+    for (const SubMesh& baseSubMesh : baseSubMeshes)
+    {
+        const WeldedSubMesh weldedSubMesh = BuildWeldedSubMeshFromSubMesh(baseSubMesh);
+
+#if DEBUGLOG
+        const uint32_t srcVertexCount = static_cast<uint32_t>(baseSubMesh.vertices.size());
+        const uint32_t srcIndexCount = static_cast<uint32_t>(baseSubMesh.indices.size());
+        const uint32_t srcTriangleCount = srcIndexCount / 3;
+
+        const uint32_t weldedVertexCount = static_cast<uint32_t>(weldedSubMesh.vertices.size());
+        const uint32_t weldedIndexCount = static_cast<uint32_t>(weldedSubMesh.indices.size());
+        const uint32_t weldedTriangleCount = weldedIndexCount / 3;
+
+        DLOG("[LOD WELD] mesh=\""); DLOG(baseSubMesh.meshName); DLOG("\" ");
+        DLOG("lodLevel="); DLOG(clampedLodLevel); DLOG(" ");
+        DLOG("srcVertices="); DLOG(srcVertexCount); DLOG(" ");
+        DLOG("weldedVertices="); DLOG(weldedVertexCount); DLOG(" ");
+        DLOG("srcTriangles="); DLOG(srcTriangleCount); DLOG(" ");
+        DLOG("weldedTriangles="); DLOGLN(weldedTriangleCount);
+#endif
+
+        (void)weldedSubMesh;
+    }
+
     // ------------------------------------------------------
-    // 2단계에서는 아직 실제 단순화를 하지 않는다.
-    // 현재는 호출 경로만 분리하는 단계이므로 원본을 그대로 복사한다.
-    // 이후 단계에서 이 함수 내부에 weld/simplify/rebuild를 넣는다.
+    // 3단계에서는 아직 실제 simplification/rebuild를 하지 않는다.
+    // 현재는 weld 중간구조를 만들고 검증 로그만 출력한다.
+    // 실제 LOD 결과 반영은 다음 단계에서 진행한다.
     // ------------------------------------------------------
 
     return outSubMeshes;
 }
+
 
 // ==========================================================
 // FBX -> RAM 추출 (비스킨 전용)
